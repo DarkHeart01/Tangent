@@ -1,0 +1,47 @@
+# Default swarm configuration — overridden by user config, project config, env vars, CLI flags
+
+provider: "openrouter"
+default_model: "deepseek/deepseek-v4-pro"
+log_level: "INFO"
+log_file: null
+
+trace_dir: "./traces"
+memory_dir: "./memory_store"
+memory_backend: "local"      # local | chroma-http
+
+bus_transport: "in-process"  # in-process | redis | nats
+redis_url: "redis://localhost:6379"
+
+agents_dir: "./agents"
+tools_dir: "./tools"
+
+api_host: "0.0.0.0"
+api_port: 8765
+dashboard_port: 8766
+
+safety_mode: "interactive"   # interactive | auto
+default_budget_usd: null
+
+indexing:
+  enabled: true
+  embedding_model: "text-embedding-004"
+  chunk_lines: 200
+  chunk_overlap: 20
+  top_k: 6
+  index_dir: ".devforge/index"
+  exclude_dirs:
+    - "node_modules"
+    - "venv"
+    - ".venv"
+    - "__pycache__"
+    - ".git"
+    - "dist"
+    - "build"
+    - ".next"
+    - "built"
+    - ".ruff_cache"
+    - ".mypy_cache"
+    - ".pytest_cache"
+    - "traces"
+    - "memory_store"
+    - "graphify-out"

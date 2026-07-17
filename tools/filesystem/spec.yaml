@@ -1,0 +1,45 @@
+name: filesystem
+description: "Read, write, list, and search files in the working directory. Write operations are restricted to the project root."
+version: "1.0.0"
+side_effect_level: mutates-local
+permissions: [filesystem_write]
+input_schema:
+  type: object
+  properties:
+    operation:
+      type: string
+      enum: [read, write, append, replace, list, search, delete, exists]
+      description: "Operation to perform"
+    path:
+      type: string
+      description: "File or directory path (relative to working directory)"
+    content:
+      type: string
+      description: "Content for write/append operations, or for 'replace' when old_string is not given (full-file overwrite)"
+    old_string:
+      type: string
+      description: "For 'replace': exact text to find. Must be unique in the file unless replace_all is set — this is the safe, precise way to edit an existing file. Prefer this over a full-file 'content' overwrite."
+    new_string:
+      type: string
+      description: "For 'replace' with old_string: the replacement text"
+    replace_all:
+      type: boolean
+      description: "For 'replace' with old_string: replace every occurrence instead of requiring a unique match"
+    query:
+      type: string
+      description: "Search query for 'search' operation"
+    recursive:
+      type: boolean
+      description: "Whether to recurse into subdirectories for list/search"
+      default: false
+    max_results:
+      type: integer
+      default: 20
+  required: [operation, path]
+  additionalProperties: false
+output_schema:
+  type: object
+timeout: 15.0
+retry_policy:
+  max_attempts: 3
+  backoff_seconds: [5, 15, 60]

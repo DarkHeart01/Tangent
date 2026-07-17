@@ -1,0 +1,60 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CompletionSignal",
+  "type": "object",
+  "required": [
+    "task_id",
+    "trace_id",
+    "agent",
+    "status",
+    "completed_at"
+  ],
+  "properties": {
+    "task_id": {
+      "type": "string"
+    },
+    "trace_id": {
+      "type": "string"
+    },
+    "agent": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["success", "failure", "blocked", "escalated", "timeout"]
+    },
+    "output_key": {
+      "type": ["string", "null"],
+      "description": "Memory key where output was written"
+    },
+    "error": {
+      "type": ["string", "null"],
+      "description": "Error message if status is failure"
+    },
+    "confidence": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 1
+    },
+    "tokens_used": {
+      "type": "integer"
+    },
+    "cost_usd": {
+      "type": "number"
+    },
+    "rounds_taken": {
+      "type": "integer"
+    },
+    "completed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "hitl_required": {
+      "type": "boolean",
+      "default": false
+    },
+    "hitl_context": {
+      "type": ["string", "null"]
+    }
+  }
+}

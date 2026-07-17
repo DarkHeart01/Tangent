@@ -1,0 +1,469 @@
+"""
+Canonical Pydantic schemas for every workforce artifact type.
+
+All artifact types inherit ArtifactBase which carries identity + lineage metadata.
+Free-text fields are minimised; structured sub-fields are preferred per §19.3.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any, Optional, Type
+
+from pydantic import BaseModel, Field
+
+
+# ── Status & type enums ───────────────────────────────────────────────────────
+
+class ArtifactStatus(str, Enum):
+    draft = "draft"
+    approved = "approved"
+    superseded = "superseded"
+
+
+class ArtifactType(str, Enum):
+    product_brief = "ProductBrief"
+    market_research = "MarketResearch"
+    prd = "PRD"
+    architecture_doc = "ArchitectureDoc"
+    cdd_contract = "CDDContract"
+    repo_discovery = "RepoDiscovery"
+    api_spec = "APISpec"
+    db_schema = "DBSchema"
+    code_change_set = "CodeChangeSet"
+    test_report = "TestReport"
+    test_plan = "TestPlan"
+    security_report = "SecurityReport"
+    code_review_report = "CodeReviewReport"
+    deployment_plan = "DeploymentPlan"
+    deployment_record = "DeploymentRecord"
+    monitoring_config = "MonitoringConfig"
+    incident_record = "IncidentRecord"
+    feedback_digest = "FeedbackDigest"
+    release_decision = "ReleaseDecision"
+    live_test_report = "LiveTestReport"
+
+
+# ── Base model ────────────────────────────────────────────────────────────────
+
+class ArtifactBase(BaseModel):
+    """Metadata fields carried by every artifact."""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    artifact_type: ArtifactType
+    version: int = 1
+    stage_id: str = ""
+    author_agent_id: str = ""
+    project_id: str = ""
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    status: ArtifactStatus = ArtifactStatus.draft
+    lineage: list[str] = Field(default_factory=list)  # parent artifact ids
+
+    class Config:
+        use_enum_values = True
+
+
+# ── Discovery & Planning ──────────────────────────────────────────────────────
+
+class ProductBrief(ArtifactBase):
+    artifact_type: ArtifactType = ArtifactType.product_brief
+    goal_statement: str = ""
+    target_market: str = ""
+    key_constraints: list[str] = Field(default_factory=list)
+    raw_goal: str = ""
+
+
+class CompetitorEntry(BaseModel):
+    name: str
+    pricing: str = ""
+    positioning: str = ""
+    gaps: list[str] = Field(default_factory=list)
+    source_url: str = ""
+
+
+class PainPoint(BaseModel):
+    description: str
+    evidence_url: str = ""
+    severity: str = "medium"  # low | medium | high
+
+
+class MarketResearch(ArtifactBase):
+    artifact_type: ArtifactType = ArtifactType.market_research
+    trend_summary: str = ""
+    competitors: list[CompetitorEntry] = Field(default_factory=list)
+    pain_points: list[PainPoint] = Field(default_factory=list)
+    recommended_positioning: str = ""
+    sources: list[str] = Field(default_factory=list)
+
+
+class FunctionalRequirement(BaseModel):
+    id: str
+    title: str
+    description: str
+    priority: str = "should"  # must | should | could | wont  (MoSCoW)
+    acceptance_criteria: list[str] = Field(default_factory=list)
+
+
+class NonFunctionalRequirement(BaseModel):
+    category: str  # performance | security | scalability | ux | ...
+    description: str
+
+
+class PRD(ArtifactBase):
+    artifact_type: ArtifactType = ArtifactType.prd
+    problem_statement: str = ""
+    target_user: str = ""
+    success_metrics: list[str] = Field(default_factory=list)
+    functional_requirements: list[FunctionalRequirement] = Field(default_factory=list)
+    non_functional_requirements: list[NonFunctionalRequirement] = Field(default_factory=list)
+    out_of_scope: list[str] = Field(default_factory=list)
+    prioritization_framework: str = "MoSCoW"
+
+
+# ── Architecture ──────────────────────────────────────────────────────────────
+
+class ComponentSpec(BaseModel):
+    name: str
+    responsibility: str
+    technology: str = ""
+
+
+class TechChoice(BaseModel):
+    area: str  # frontend | backend | database | infra | ...
+    choice: str
+    rationale: str
+
+
+class APIEndpoint(BaseModel):
+    method: str   # GET | POST | PUT | DELETE | PATCH
+    path: str
+    purpose: str
+    auth_required: bool = True
+
+
+class ArchitectureDoc(ArtifactBase):
+    artifact_type: ArtifactType = ArtifactType.architecture_doc
+    system_context: str = ""
+    components: list[ComponentSpec] = Field(default_factory=list)
+    tech_stack: list[TechChoice] = Field(default_factory=list)
+    api_endpoints: list[APIEndpoint] = Field(default_factory=list)
+    data_model_summary: str = ""
+    non_functional_notes: str = ""
+    # References to Mermaid diagram artifact ids
+    diagram_refs: list[str] = Field(default_factory=list)
+
+
+class APISpec(ArtifactBase):
+    artifact_type: ArtifactType = ArtifactType.api_spec
+    service_name: str = ""
+    base_path: str = "/"
+    endpoints: list[APIEndpoint] = Field(default_factory=list)
+    openapi_source: str = ""   # path to generated OpenAPI YAML in workspace
+
+
+class RepoDiscovery(ArtifactBase):
+    """
+    Records the starting-point strategy chosen by the repo_scout agent.
+
+    strategy values:
+      clone_existing  — a close GitHub repo was found and cloned
+      use_boilerplate — no close repo; a known boilerplate template was selected
+      from_scratch    — neither option fit; engineers write the full codebase
+    """
+    artifact_type: ArtifactType = ArtifactType.repo_discovery
+    strategy: str = "from_scratch"          # clone_existing | use_boilerplate | from_scratch
+
+    # clone_existing fields
+    source_repo_url:   str = ""             # original GitHub URL
+    source_repo_name:  str = ""             # owner/repo
+    cloned_to:         str = ""             # built/<dir> path
+    commit_sha:        str = ""
+    similarity_score:  float = 0.0
+
+    # use_boilerplate fields
+    boilerplate_id:    str = ""             # template_list id
+    boilerplate_path:  str = ""             # workspace/<dir> path
+
+    # shared
+    rationale:         str = ""             # why this strategy was chosen
+    search_query_used: str = ""             # GitHub query that was run
+
+
+class CDDContract(ArtifactBase):
+    """Full Contract-Driven Development document for a consumer-provider pair."""
+    artifact_type: ArtifactType = ArtifactType.cdd_contract
+    project_name: str = ""
+    contract_version: str = "1.0.0"
+    contract_status: str = "DRAFT"          # DRAFT | REVIEW | APPROVED | DEPRECATED
+    consumer_service: str = ""
+    provider_service: str = ""
+    primary_protocol: str = "HTTP_REST"
+    async_broker: str = "N/A"
+    full_document: str = ""                 # The complete 10-deliverable CDD markdown
+    openapi_yaml: str = ""                  # Extracted OpenAPI 3.x YAML (Deliverable 3)
+    asyncapi_yaml: str = ""                 # Extracted AsyncAPI YAML if broker != N/A
+    ci_pipeline_yaml: str = ""             # Extracted CI/CD pipeline YAML (Deliverable 9)
+    boilerplate_cloned_to: str = ""         # Workspace path where boilerplate was cloned by contractor
+
+
+class EntityField(BaseModel):
+    name: str
+    data_type: str
+    nullable: bool = True
+    description: str = ""
+
+
+class Entity(BaseModel):
+    name: str
+    fields: list[EntityField] = Field(default_factory=list)
+    relationships: list[str] = Field(default_factory=list)
+
+
+class DBSchema(ArtifactBase):
+    artifact_type: ArtifactType = ArtifactType.db_schema
+    database_engine: str = "postgres"
+    entities: list[Entity] = Field(default_factory=list)
+    migration_tool: str = "alembic"
+
+
+# ── Build ─────────────────────────────────────────────────────────────────────
+
+class FileChange(BaseModel):
+    path: str
+    operation: str  # create | modify | delete
+    description: str = ""
+
+
+class ReversalPlan(BaseModel):
+    description: str
+    steps: list[str] = Field(default_factory=list)
+
+
+class CodeChangeSet(ArtifactBase):
+    artifact_type: ArtifactType = ArtifactType.code_change_set
+    layer: str = ""  # frontend | backend | database | integration | devops
+    files_changed: list[FileChange] = Field(default_factory=list)
+    summary: str = ""
+    reversal_plan: ReversalPlan = Field(default_factory=lambda: ReversalPlan(description="revert via git"))
+
+
+# ── Quality ───────────────────────────────────────────────────────────────────
+
+class TestSuite(BaseModel):
+    name: str
+    kind: str  # unit | integration | e2e
+    pass_count: int = 0
+    fail_count: int = 0
+    skip_count: int = 0
+    coverage_pct: float = 0.0
+
+
+class UncoveredCriterion(BaseModel):
+    requirement_id: str
+    reason: str = ""
+
+
+class TestCase(BaseModel):
+    test_id: str
+    criterion_ref: str = ""
+    description: str = ""
+    preconditions: str = ""
+    inputs: str = ""
+    expected_output: str = ""
+    test_type: str = "unit"  # unit | integration | e2e | contract
+
+
+class TestPlan(ArtifactBase):
+    """Pre-implementation test specification produced by test_generator."""
+    artifact_type: ArtifactType = ArtifactType.test_plan
+    test_cases: list[TestCase] = Field(default_factory=list)
+    untestable_criteria: list[str] = Field(default_factory=list)
+    total_count: int = 0
+    generated_at: str = ""
+
+
+class TestReport(ArtifactBase):
+    artifact_type: ArtifactType = ArtifactType.test_report
+    suites: list[TestSuite] = Field(default_factory=list)
+    overall_pass: bool = False
+    overall_coverage_pct: float = 0.0
+    uncovered_acceptance_criteria: list[UncoveredCriterion] = Field(default_factory=list)
+
+
+class SecurityFinding(BaseModel):
+    tool: str
+    severity: str  # critical | high | medium | low | info
+    title: str
+    location: str = ""
+    description: str = ""
+    cve: str = ""
+
+
+class SecurityReport(ArtifactBase):
+    artifact_type: ArtifactType = ArtifactType.security_report
+    findings: list[SecurityFinding] = Field(default_factory=list)
+    owasp_checklist: dict[str, bool] = Field(default_factory=dict)
+    blocks_progression: bool = False  # True if any Critical/High
+
+
+class ReviewComment(BaseModel):
+    file_path: str = ""
+    line: Optional[int] = None
+    severity: str  # error | warning | info
+    message: str
+    tool: str = "llm"  # linter | ast | llm
+
+
+class ReviewVerdict(str, Enum):
+    approve = "approve"
+    request_changes = "request_changes"
+    block = "block"
+
+
+class CodeReviewReport(ArtifactBase):
+    artifact_type: ArtifactType = ArtifactType.code_review_report
+    comments: list[ReviewComment] = Field(default_factory=list)
+    verdict: ReviewVerdict = ReviewVerdict.request_changes
+    architectural_concerns: list[str] = Field(default_factory=list)
+
+    class Config:
+        use_enum_values = True
+
+
+# ── Deployment ────────────────────────────────────────────────────────────────
+
+class PipelineStage(BaseModel):
+    name: str
+    description: str = ""
+    rollback_step: str = ""
+
+
+class DeploymentPlan(ArtifactBase):
+    artifact_type: ArtifactType = ArtifactType.deployment_plan
+    target_environment: str = "staging"  # staging | production | local
+    strategy: str = "rolling"  # rolling | blue_green | canary
+    pipeline_stages: list[PipelineStage] = Field(default_factory=list)
+    ci_tool: str = "github_actions"
+
+
+class DeploymentRecord(ArtifactBase):
+    artifact_type: ArtifactType = ArtifactType.deployment_record
+    environment: str = "staging"
+    strategy_used: str = "rolling"
+    image_digest: str = ""
+    rollout_started_at: Optional[datetime] = None
+    rollout_completed_at: Optional[datetime] = None
+    rollback_handle: str = ""   # command or procedure reference
+    reversal_plan: ReversalPlan = Field(default_factory=lambda: ReversalPlan(description="revert deployment"))
+
+
+class SLODefinition(BaseModel):
+    name: str
+    query: str
+    threshold: float
+    window_minutes: int = 60
+
+
+class MonitoringConfig(ArtifactBase):
+    artifact_type: ArtifactType = ArtifactType.monitoring_config
+    slos: list[SLODefinition] = Field(default_factory=list)
+    alert_channels: list[str] = Field(default_factory=list)
+    dashboard_refs: list[str] = Field(default_factory=list)
+
+
+# ── Post-Launch ───────────────────────────────────────────────────────────────
+
+class IncidentRecord(ArtifactBase):
+    artifact_type: ArtifactType = ArtifactType.incident_record
+    triggered_by: str  # slo_breach | alert | user_report
+    slo_name: str = ""
+    severity: str = "high"
+    description: str = ""
+    resolved: bool = False
+    rollback_invoked: bool = False
+
+
+class FeedbackTheme(BaseModel):
+    theme: str
+    sentiment: str  # positive | negative | neutral
+    count: int = 1
+    evidence_quotes: list[str] = Field(default_factory=list)
+    prd_delta_suggestion: str = ""
+
+
+class FeedbackDigest(ArtifactBase):
+    artifact_type: ArtifactType = ArtifactType.feedback_digest
+    source_count: int = 0
+    themes: list[FeedbackTheme] = Field(default_factory=list)
+    overall_sentiment: str = "neutral"
+    recommended_prd_deltas: list[str] = Field(default_factory=list)
+
+
+class ReleaseVerdict(str, Enum):
+    hotfix = "hotfix"
+    minor_update = "minor_update"
+    major_respec = "major_respec"
+
+
+class ReleaseDecision(ArtifactBase):
+    artifact_type: ArtifactType = ArtifactType.release_decision
+    verdict: ReleaseVerdict = ReleaseVerdict.minor_update
+    routing_phase: str = "planning"  # phase id to re-enter: discovery | planning | build | ...
+    evidence_artifact_ids: list[str] = Field(default_factory=list)
+    changelog_draft: str = ""
+
+    class Config:
+        use_enum_values = True
+
+
+class LiveTestEndpointResult(BaseModel):
+    method: str
+    path: str
+    status_code: int = 0
+    passed: bool = False
+    error: str = ""
+
+
+class LiveTestReport(ArtifactBase):
+    """Result of the live integration test phase (backend + frontend up + CRUD verified)."""
+    artifact_type: ArtifactType = ArtifactType.live_test_report
+    backend_url: str = ""
+    frontend_url: str = ""
+    backend_up: bool = False
+    frontend_up: bool = False
+    endpoints_tested: list[LiveTestEndpointResult] = Field(default_factory=list)
+    pass_count: int = 0
+    fail_count: int = 0
+    all_passed: bool = False
+    debug_cycles: int = 0   # how many debug→fix rounds were needed
+    error_summary: str = ""
+
+    class Config:
+        use_enum_values = True
+
+
+# ── Type registry (name → class) ──────────────────────────────────────────────
+
+ARTIFACT_REGISTRY: dict[str, Type[ArtifactBase]] = {
+    ArtifactType.product_brief.value: ProductBrief,
+    ArtifactType.market_research.value: MarketResearch,
+    ArtifactType.prd.value: PRD,
+    ArtifactType.architecture_doc.value: ArchitectureDoc,
+    ArtifactType.api_spec.value: APISpec,
+    ArtifactType.repo_discovery.value: RepoDiscovery,
+    ArtifactType.cdd_contract.value: CDDContract,
+    ArtifactType.db_schema.value: DBSchema,
+    ArtifactType.code_change_set.value: CodeChangeSet,
+    ArtifactType.test_plan.value: TestPlan,
+    ArtifactType.test_report.value: TestReport,
+    ArtifactType.security_report.value: SecurityReport,
+    ArtifactType.code_review_report.value: CodeReviewReport,
+    ArtifactType.deployment_plan.value: DeploymentPlan,
+    ArtifactType.deployment_record.value: DeploymentRecord,
+    ArtifactType.monitoring_config.value: MonitoringConfig,
+    ArtifactType.incident_record.value: IncidentRecord,
+    ArtifactType.feedback_digest.value: FeedbackDigest,
+    ArtifactType.release_decision.value: ReleaseDecision,
+    ArtifactType.live_test_report.value: LiveTestReport,
+}

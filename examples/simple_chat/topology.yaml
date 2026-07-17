@@ -1,0 +1,25 @@
+name: simple_chat
+description: "Single summarizer agent example for lightweight conversational tasks."
+
+orchestrator: orchestrator
+
+agents:
+  - role: summarizer
+    count: 1
+    model_override: deepseek/deepseek-v4-pro
+
+coordination:
+  strategy: hierarchical
+  max_subswarm_size: 1
+  consensus_protocol: majority
+  debate_max_rounds: 1
+
+budget:
+  max_cost_usd: 0.05
+  warn_at_fraction: 0.8
+
+safety:
+  mode: auto
+  tool_allowlist: [memory_store]
+
+memory_backend: local

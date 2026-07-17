@@ -1,0 +1,109 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TaskEnvelope",
+  "type": "object",
+  "required": [
+    "task_id",
+    "trace_id",
+    "agent_target",
+    "goal",
+    "context_keys",
+    "hitl_threshold",
+    "created_at"
+  ],
+  "properties": {
+    "task_id": {
+      "type": "string",
+      "description": "Unique ID for this task instance (UUID)"
+    },
+    "trace_id": {
+      "type": "string",
+      "description": "Propagated across the full chain - same value from entry point to final agent"
+    },
+    "parent_task_id": {
+      "type": ["string", "null"],
+      "description": "ID of the task that spawned this one, null if root"
+    },
+    "agent_target": {
+      "type": "string",
+      "description": "Name of the agent this envelope is addressed to"
+    },
+    "goal": {
+      "type": "string",
+      "description": "Plain-language description of what the agent must accomplish"
+    },
+    "input_artifacts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "List of artifact keys to read from memory before starting"
+    },
+    "context_keys": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Memory keys the agent should retrieve for context"
+    },
+    "output_artifact": {
+      "type": "string",
+      "description": "The memory key the agent must write its primary output to on completion"
+    },
+    "hitl_threshold": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Confidence below which the agent must escalate to human_liaison"
+    },
+    "hitl_mandatory": {
+      "type": "boolean",
+      "default": false,
+      "description": "If true, always route through human_liaison regardless of confidence"
+    },
+    "max_rounds": {
+      "type": "integer",
+      "default": 3,
+      "description": "Maximum critic/revision rounds before escalating"
+    },
+    "retry_policy": {
+      "type": "object",
+      "properties": {
+        "max_attempts": {
+          "type": "integer",
+          "default": 3
+        },
+        "backoff_seconds": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "default": [5, 15, 60]
+        }
+      }
+    },
+    "timeout_seconds": {
+      "type": "integer",
+      "default": 300,
+      "description": "Agent must emit a status update or complete within this window"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "token_budget": {
+          "type": "integer"
+        },
+        "cost_usd_limit": {
+          "type": "number"
+        },
+        "spawned_by": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

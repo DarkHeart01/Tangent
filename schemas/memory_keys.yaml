@@ -1,0 +1,70 @@
+# Memory Key Schema
+# Format: <domain>.<entity>.<version>
+# All agents read/write using these exact keys.
+
+planning:
+  requirements:         "planning.requirements.v1"
+  user_stories:         "planning.user_stories.v1"
+  acceptance_criteria:  "planning.acceptance_criteria.v1"
+  sprint_plan:          "planning.sprint_plan.v1"
+  risk_flags:           "planning.risk_flags.v1"
+
+architecture:
+  system_design:        "architecture.system_design.v1"
+  tech_stack:           "architecture.tech_stack.v1"
+  adr_log:              "architecture.adr_log.v1"
+  sequence_diagrams:    "architecture.sequence_diagrams.v1"
+
+contracts:
+  openapi_spec:         "contracts.openapi_spec.v1"
+  data_models:          "contracts.data_models.v1"
+  db_schema:            "contracts.db_schema.v1"
+
+codebase:
+  repo_index:           "codebase.repo_index.v1"
+  conventions:          "codebase.conventions.v1"
+  dependency_manifest:  "codebase.dependency_manifest.v1"
+
+development:
+  backend_output:       "development.backend_output.v1"
+  frontend_output:      "development.frontend_output.v1"
+  db_migrations:        "development.db_migrations.v1"
+
+review:
+  code_review_report:   "review.code_review_report.v1"
+  critic_feedback:      "review.critic_feedback.v1"
+  security_findings:    "review.security_findings.v1"
+
+testing:
+  test_plan:            "testing.test_plan.v1"
+  test_results:         "testing.test_results.v1"
+  integration_results:  "testing.integration_results.v1"
+  performance_report:   "testing.performance_report.v1"
+  cve_report:           "testing.cve_report.v1"
+
+deployment:
+  pipeline_config:      "deployment.pipeline_config.v1"
+  deploy_manifest:      "deployment.deploy_manifest.v1"
+  rollback_plan:        "deployment.rollback_plan.v1"
+
+release:
+  changelog:            "release.changelog.v1"
+  release_notes:        "release.release_notes.v1"
+  version_tag:          "release.version_tag.v1"
+
+docs:
+  readme:               "docs.readme.v1"
+  api_reference:        "docs.api_reference.v1"
+  architecture_wiki:    "docs.architecture_wiki.v1"
+
+monitoring:
+  slo_report:           "monitoring.slo_report.v1"
+  incident_log:         "monitoring.incident_log.v1"
+  alert_rules:          "monitoring.alert_rules.v1"
+
+feedback:
+  user_feedback_digest: "feedback.user_feedback_digest.v1"
+  bug_triage:           "feedback.bug_triage.v1"
+
+system:
+  dead_letter_queue:    "system.dead_letter_queue.v1"

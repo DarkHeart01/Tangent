@@ -1,0 +1,22 @@
+name: code_search
+description: "Semantic + keyword search over the local codebase's indexed source files. Returns ranked, file:line-cited chunks. Call this before editing any file you haven't already read in this task — never guess at existing code structure."
+version: "1.0.0"
+side_effect_level: read-only
+permissions: []
+input_schema:
+  type: object
+  properties:
+    query:
+      type: string
+      description: "Natural-language or keyword description of the code you're looking for."
+    k:
+      type: integer
+      description: "Number of results to return (default 6)."
+    path_filter:
+      type: string
+      description: "Optional substring to restrict results to matching file paths."
+  required: [query]
+  additionalProperties: false
+output_schema:
+  type: object
+timeout: 30.0

@@ -1,0 +1,102 @@
+# Full local stack: MongoDB + PromptForge API + Next.js UI + DevForge Swarm API + Redis
+#
+# Usage:
+#   cp .env.example .env          # set OPENROUTER_API_KEY + OPENAI_API_KEY
+#   cp .env.example devforge-frontend/frontend/.env.local  # or copy NEXT_PUBLIC_* lines only
+#   docker compose -f docker-compose.full.yml up --build
+#
+# UI:     http://localhost:3000
+# Swarm:  http://localhost:8765
+# API:    http://localhost:8000
+
+x-swarm-build: &swarm-build
+  context: .
+  dockerfile: Dockerfile
+
+services:
+  mongodb:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    restart: unless-stopped
+
+  promptforge-api:
+    build:
+      context: ./devforge-frontend/backend
+      dockerfile: Dockerfile
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - MONGODB_URL=mongodb://mongodb:27017
+      - DATABASE_NAME=promptforge
+      - SECRET_KEY=${SECRET_KEY:-dev-secret-change-me}
+      - CORS_ORIGINS=http://localhost:3000
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mongodb
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./devforge-frontend/frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+        NEXT_PUBLIC_SWARM_API_URL: http://localhost:8765
+        NEXT_PUBLIC_SWARM_WS_URL: ws://localhost:8765/ws
+    ports:
+      - "3000:3000"
+    depends_on:
+      - promptforge-api
+      - swarm
+    restart: unless-stopped
+
+  swarm:
+    build: *swarm-build
+    command: ["swarm", "dashboard", "--host", "0.0.0.0", "--port", "8765", "--topology", "examples/software_delivery/topology.yaml"]
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - SWARM_PROVIDER=${SWARM_PROVIDER:-openrouter}
+      - SWARM_DEFAULT_MODEL=${SWARM_DEFAULT_MODEL:-deepseek/deepseek-v4-pro}
+      - SWARM_BUS_TRANSPORT=redis
+      - SWARM_REDIS_URL=redis://redis:6379
+      - SWARM_DEPLOYMENT_MODE=${SWARM_DEPLOYMENT_MODE:-local}
+      - SWARM_SAFETY_MODE=auto
+      - SWARM_MEMORY_DIR=/data/memory
+      - SWARM_TRACE_DIR=/data/traces
+      - SWARM_LOG_LEVEL=INFO
+    volumes:
+      - swarm_data:/data
+      - ./agents:/app/agents:ro
+      - ./tools:/app/tools:ro
+      - ./configs:/app/configs:ro
+      - ./examples:/app/examples:ro
+      - ./schemas:/app/schemas:ro
+      # Mount a host folder for agent output (set SWARM_OUTPUT_DIR in .env)
+      - ${SWARM_OUTPUT_DIR:-./swarm_output}:/app/output
+    ports:
+      - "8765:8765"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  mongo_data:
+  swarm_data:
+  redis_data:

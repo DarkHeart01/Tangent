@@ -1,0 +1,49 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+*.egg-info/
+dist/
+build/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+traces/
+memory_store/
+*.jsonl
+*.log
+chroma_db/
+graphify-out/
+.devforge/
+
+# Frontend (Next.js) — devforge-frontend itself is tracked; just not its
+# generated/local-only artifacts.
+node_modules/
+devforge-frontend/frontend/.next/
+devforge-frontend/frontend/out/
+devforge-frontend/frontend/.env.local
+devforge-frontend/frontend/.env.development.local
+devforge-frontend/frontend/.env.test.local
+devforge-frontend/frontend/.env.production.local
+devforge-frontend/frontend/next-env.d.ts
+
+# Frontend backend (Python)
+devforge-frontend/backend/__pycache__/
+devforge-frontend/backend/venv/
+devforge-frontend/backend/.venv/
+devforge-frontend/backend/.env
+
+# Local Claude Code settings (machine-specific)
+.claude/settings.local.json
+
+# Generated swarm-run demo output (not part of source)
+/built/
+/diagrams/
+/test_store_smoke/
+/test_store_smoke4/
+/swarm_output/
+/*.mmd

@@ -1,0 +1,55 @@
+name: coding_swarm
+description: |
+  Coding swarm with a pre-build feasibility gate:
+  RealityCheck (gate) → Planner → Backend/Frontend Engineers → Critic.
+  The RealityCheck agent evaluates the goal before any planning starts, flags
+  infeasible or ambiguous requirements, and resolves them with the user via the
+  HumanLiaison before the build begins.
+
+orchestrator: orchestrator
+
+agents:
+  - role: reality_check
+    count: 1
+  - role: human_liaison
+    count: 1
+  - role: orchestrator
+    count: 1
+  - role: planner
+    count: 1
+  - role: backend_engineer
+    count: 1
+  - role: frontend_engineer
+    count: 1
+  - role: critic
+    count: 1
+
+coordination:
+  strategy: hierarchical
+  max_subswarm_size: 3
+  consensus_protocol: weighted
+  debate_max_rounds: 2
+
+budget:
+  max_cost_usd: 2.00
+  warn_at_fraction: 0.7
+
+safety:
+  mode: interactive   # Confirm before writing/deleting files
+  tool_allowlist:
+    - filesystem
+    - shell_exec
+    - code_sandbox
+    - linter_run
+    - ast_inspect
+    - project_scaffold
+    - calculator
+    - data_parse
+    - memory_retrieve
+    - memory_store
+    - self_reflect
+    - spawn_agent
+    - send_message
+    - human_input
+
+memory_backend: local

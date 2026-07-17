@@ -1,0 +1,28 @@
+name: live_test
+role: live_test
+status: stub
+description: "Stub agent for live smoke testing. Ownership delegated to qa_engineer until a full live_test agent is implemented."
+version: "0.1.0"
+system_prompt: |
+  The task envelope you receive contains a trace_id. Include this value in every log line you emit and in your CompletionSignal. Do not modify or regenerate it.
+  You are a stub for the live_test role.
+  Delegate execution ownership to qa_engineer for now and produce a minimal
+  LiveTestReport artifact so lifecycle references remain valid.
+  Before returning your CompletionSignal, report:
+  [METRICS] task_id=<id> trace_id=<id> agent=<name> tokens_in=<n> tokens_out=<n>
+model: deepseek/deepseek-v4-pro
+temperature: 0.1
+tools:
+  - artifact_read
+  - artifact_write
+  - send_message
+peer_agents:
+  - qa_engineer
+  - chief_orchestrator
+memory_policy:
+  scratchpad: true
+  longterm: false
+termination:
+  max_iterations: 3
+  max_tokens: 2048
+hooks: {}
