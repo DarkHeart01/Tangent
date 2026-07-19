@@ -10,6 +10,8 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+
+	"shell/internal/docker"
 )
 
 // gateDecision is delivered from ResolveGate (an RPC-handler goroutine) to
@@ -19,25 +21,24 @@ type gateDecision struct {
 	Note     string
 }
 
-// Session is the in-memory record for one simulated agent run. Only the
-// simulator goroutine ever calls emit()/appendEvent-adjacent mutations that
-// assign seq, so seq assignment needs no locking beyond what protects the
-// shared events/subs slices for concurrent WS readers.
+// Session is the in-memory record for one agent run, simulated or
+// container-backed.
 type Session struct {
-	ID           string
-	Goal         string
-	Topology     string
-	WorktreePath string
-	TangentDir   string
-	StartedAt    string
+	ID         string
+	Goal       string
+	Topology   string
+	Mode       string // "simulated" | "container" — immutable after StartSession
+	TangentDir string
+	StartedAt  string
 
-	mu      sync.Mutex
-	status  string // running | success | failed | cancelled
-	endedAt string
-	nextSeq int
-	events  []Envelope
-	subs    map[int]chan Envelope
-	nextSub int
+	mu           sync.Mutex
+	status       string // running | success | failed | cancelled
+	endedAt      string
+	worktreePath string // simulated: set at creation; container: set async by executor.Start via session.started
+	nextSeq      int
+	events       []Envelope
+	subs         map[int]chan Envelope
+	nextSub      int
 
 	broadcast chan Envelope
 
@@ -57,14 +58,34 @@ func (s *Session) Status() string {
 	return s.status
 }
 
+// GetWorktreePath is the safe accessor for worktreePath. Needed because
+// container-mode sessions have it set asynchronously (once the real git
+// worktree exists) rather than synchronously at StartSession time.
+func (s *Session) GetWorktreePath() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.worktreePath
+}
+
+func (s *Session) setWorktreePath(path string) {
+	s.mu.Lock()
+	s.worktreePath = path
+	s.mu.Unlock()
+}
+
 // Emit assigns the next seq, timestamps the envelope, and hands it to the
-// session's fanout goroutine. Must only be called from the session's single
-// producer goroutine (the simulator).
+// session's fanout goroutine. Safe for concurrent callers: seq assignment
+// and the channel send happen inside the same critical section, so the
+// broadcast channel's receive order always matches seq order regardless of
+// how many producer goroutines call Emit concurrently (simulator.go has
+// exactly one; ContainerExecutor has several — its log-stream and
+// filesystem-watcher goroutines both emit for the same session).
 func (s *Session) Emit(t EventType, payload interface{}) Envelope {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	seq := s.nextSeq
 	s.nextSeq++
-	s.mu.Unlock()
 
 	env := Envelope{
 		V:         1,
@@ -194,41 +215,100 @@ func (s *Session) summary() SessionSummary {
 		SessionID: s.ID,
 		Goal:      s.Goal,
 		Topology:  s.Topology,
+		Mode:      s.Mode,
 		Status:    s.status,
 		StartedAt: s.StartedAt,
 		EndedAt:   s.endedAt,
 	}
 }
 
-// Manager owns every in-memory Session and the on-disk sessions/ tree.
+// Manager owns every in-memory Session and the on-disk sessions/ tree, and
+// routes StartSession/StopSession to either the scripted simulator or the
+// real Docker-backed ContainerExecutor depending on SessionStartOpts.Mode.
 type Manager struct {
 	mu           sync.RWMutex
 	sessions     map[string]*Session
 	sessionsRoot string
+	repoPath     string // git repo worktree.CreateWorktree operates against, for "container" mode
+
+	execMu   sync.Mutex
+	docker   *docker.DockerManager
+	executor *ContainerExecutor
 }
 
-func NewManager(sessionsRoot string) *Manager {
+func NewManager(sessionsRoot, repoPath string) *Manager {
 	return &Manager{
 		sessions:     make(map[string]*Session),
 		sessionsRoot: sessionsRoot,
+		repoPath:     repoPath,
 	}
 }
 
-func (m *Manager) StartSession(goal, topology string) (*Session, error) {
-	if goal == "" {
+// containerExecutor lazily creates the Docker client and ContainerExecutor
+// on first use, so the app (and simulated-mode sessions) work fine even if
+// Docker isn't installed or running — simulator.go remains a dev-mode
+// fallback that has no Docker dependency at all.
+func (m *Manager) containerExecutor() (*ContainerExecutor, error) {
+	m.execMu.Lock()
+	defer m.execMu.Unlock()
+	if m.executor != nil {
+		return m.executor, nil
+	}
+	dm, err := docker.NewDockerManager()
+	if err != nil {
+		return nil, fmt.Errorf("docker unavailable: %w", err)
+	}
+	m.docker = dm
+	m.executor = NewContainerExecutor(dm, m.repoPath, m.emitToSession)
+	return m.executor, nil
+}
+
+// emitToSession is the hook ContainerExecutor uses to publish events —
+// exactly the same Envelope pipeline simulator.go feeds via sess.Emit, so
+// wsserver and the frontend need zero changes for container mode. It also
+// keeps Session.status and Session.worktreePath (both otherwise private)
+// in sync with what the executor reports, since executor.go only knows a
+// sessionID, not the *Session itself.
+func (m *Manager) emitToSession(sessionID, eventType string, payload interface{}) {
+	sess, ok := m.Get(sessionID)
+	if !ok {
+		return
+	}
+	et := EventType(eventType)
+	switch et {
+	case EventSessionStarted:
+		if started, ok := payload.(SessionStarted); ok && started.WorktreePath != "" {
+			sess.setWorktreePath(started.WorktreePath)
+			writeManifest(sess)
+		}
+	case EventSessionEnded:
+		if ended, ok := payload.(SessionEnded); ok {
+			sess.setStatus(ended.Status)
+		}
+	}
+	sess.Emit(et, payload)
+}
+
+func (m *Manager) StartSession(opts SessionStartOpts) (*Session, error) {
+	if opts.Goal == "" {
 		return nil, fmt.Errorf("goal must not be empty")
 	}
-	if topology == "" {
-		topology = "coding_swarm"
+	if opts.Topology == "" {
+		opts.Topology = "coding_swarm"
+	}
+	mode := opts.Mode
+	if mode == "" {
+		mode = "simulated"
+	}
+	if mode != "simulated" && mode != "container" {
+		return nil, fmt.Errorf("unknown mode %q (want \"simulated\" or \"container\")", mode)
 	}
 
 	id := uuid.NewString()
 	sessionDir := filepath.Join(m.sessionsRoot, id)
-	worktreeDir := filepath.Join(sessionDir, "worktree")
 	tangentDir := filepath.Join(sessionDir, ".tangent")
 	contractsDir := filepath.Join(tangentDir, "contracts")
-
-	for _, dir := range []string{worktreeDir, tangentDir, contractsDir} {
+	for _, dir := range []string{tangentDir, contractsDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, fmt.Errorf("create session dirs: %w", err)
 		}
@@ -236,19 +316,43 @@ func (m *Manager) StartSession(goal, topology string) (*Session, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	sess := &Session{
-		ID:           id,
-		Goal:         goal,
-		Topology:     topology,
-		WorktreePath: worktreeDir,
-		TangentDir:   tangentDir,
-		StartedAt:    nowISO(),
-		status:       "running",
-		subs:         make(map[int]chan Envelope),
-		gates:        make(map[string]chan gateDecision),
-		broadcast:    make(chan Envelope, 64),
-		ctx:          ctx,
-		cancel:       cancel,
-		tracePath:    filepath.Join(tangentDir, "trace.jsonl"),
+		ID:         id,
+		Goal:       opts.Goal,
+		Topology:   opts.Topology,
+		Mode:       mode,
+		TangentDir: tangentDir,
+		StartedAt:  nowISO(),
+		status:     "running",
+		subs:       make(map[int]chan Envelope),
+		gates:      make(map[string]chan gateDecision),
+		broadcast:  make(chan Envelope, 64),
+		ctx:        ctx,
+		cancel:     cancel,
+		tracePath:  filepath.Join(tangentDir, "trace.jsonl"),
+	}
+
+	if mode == "simulated" {
+		worktreeDir := filepath.Join(sessionDir, "worktree")
+		if err := os.MkdirAll(worktreeDir, 0o755); err != nil {
+			cancel()
+			return nil, fmt.Errorf("create worktree dir: %w", err)
+		}
+		sess.worktreePath = worktreeDir
+		if err := seedWorktree(worktreeDir); err != nil {
+			cancel()
+			return nil, fmt.Errorf("seed worktree: %w", err)
+		}
+	}
+	// container mode: worktreePath is set asynchronously by emitToSession
+	// once ContainerExecutor.Start's real `git worktree add` succeeds.
+
+	if err := writeManifest(sess); err != nil {
+		cancel()
+		return nil, fmt.Errorf("write manifest: %w", err)
+	}
+	if err := writeCost(sess, CostReport{}); err != nil {
+		cancel()
+		return nil, fmt.Errorf("write cost: %w", err)
 	}
 
 	m.mu.Lock()
@@ -257,25 +361,45 @@ func (m *Manager) StartSession(goal, topology string) (*Session, error) {
 
 	go sess.fanoutLoop()
 
-	if err := seedWorktree(worktreeDir); err != nil {
-		return nil, fmt.Errorf("seed worktree: %w", err)
+	switch mode {
+	case "simulated":
+		go runSimulator(sess)
+	case "container":
+		executor, err := m.containerExecutor()
+		if err != nil {
+			m.removeSession(id)
+			cancel()
+			return nil, err
+		}
+		if err := executor.Start(id, opts); err != nil {
+			m.removeSession(id)
+			cancel()
+			return nil, fmt.Errorf("start container executor: %w", err)
+		}
 	}
-	if err := writeManifest(sess); err != nil {
-		return nil, fmt.Errorf("write manifest: %w", err)
-	}
-	if err := writeCost(sess, CostReport{}); err != nil {
-		return nil, fmt.Errorf("write cost: %w", err)
-	}
-
-	go runSimulator(sess)
 
 	return sess, nil
+}
+
+func (m *Manager) removeSession(id string) {
+	m.mu.Lock()
+	delete(m.sessions, id)
+	m.mu.Unlock()
 }
 
 func (m *Manager) StopSession(sessionID string) error {
 	sess, ok := m.Get(sessionID)
 	if !ok {
 		return fmt.Errorf("session %q not found", sessionID)
+	}
+	if sess.Mode == "container" {
+		m.execMu.Lock()
+		executor := m.executor
+		m.execMu.Unlock()
+		if executor == nil {
+			return fmt.Errorf("no container executor active for session %q", sessionID)
+		}
+		return executor.Stop(sessionID)
 	}
 	sess.cancel()
 	return nil
@@ -397,7 +521,7 @@ func writeManifest(sess *Session) error {
 		SessionID:    sess.ID,
 		Goal:         sess.Goal,
 		Topology:     sess.Topology,
-		WorktreePath: sess.WorktreePath,
+		WorktreePath: sess.GetWorktreePath(),
 		Status:       sess.Status(),
 		StartedAt:    sess.StartedAt,
 	}

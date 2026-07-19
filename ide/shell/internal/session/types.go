@@ -146,6 +146,14 @@ type EngineError struct {
 
 // ── Control-plane (Wails request/response) types ────────────────────────────
 
+// SessionStartOpts is the input to Manager.StartSession and
+// ContainerExecutor.Start.
+type SessionStartOpts struct {
+	Goal     string `json:"goal"`
+	Topology string `json:"topology"`
+	Mode     string `json:"mode"` // "simulated" | "container" — empty defaults to "simulated"
+}
+
 type StartSessionResult struct {
 	SessionID string `json:"session_id"`
 	WSURL     string `json:"ws_url"`
@@ -155,6 +163,7 @@ type SessionSummary struct {
 	SessionID string `json:"session_id"`
 	Goal      string `json:"goal"`
 	Topology  string `json:"topology"`
+	Mode      string `json:"mode"`
 	Status    string `json:"status"` // running | success | failed | cancelled
 	StartedAt string `json:"started_at"`
 	EndedAt   string `json:"ended_at,omitempty"`

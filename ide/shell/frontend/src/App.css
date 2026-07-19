@@ -145,6 +145,17 @@
   margin-top: 4px;
 }
 
+.session-list__mode {
+  padding: 0 6px;
+  border-radius: 8px;
+  border: 1px solid #30363d;
+}
+
+.session-list__mode--container {
+  color: #58a6ff;
+  border-color: #1f6feb;
+}
+
 .session-list__stop {
   margin-top: 6px;
   font-size: 11px;

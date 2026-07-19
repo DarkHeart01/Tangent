@@ -16,7 +16,7 @@ func runSimulator(sess *Session) {
 	sess.Emit(EventSessionStarted, SessionStarted{
 		Goal:         sess.Goal,
 		Topology:     sess.Topology,
-		WorktreePath: sess.WorktreePath,
+		WorktreePath: sess.worktreePath,
 	})
 
 	if !pace(sess.ctx) {
@@ -277,7 +277,7 @@ func pace(ctx context.Context) bool {
 func strPtr(s string) *string { return &s }
 
 func writeFileInWorktree(sess *Session, relPath, content string) {
-	full := filepath.Join(sess.WorktreePath, filepath.FromSlash(relPath))
+	full := filepath.Join(sess.worktreePath, filepath.FromSlash(relPath))
 	os.MkdirAll(filepath.Dir(full), 0o755)
 	os.WriteFile(full, []byte(content), 0o644)
 }

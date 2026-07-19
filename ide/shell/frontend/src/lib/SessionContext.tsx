@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { SessionWsClient, onEnvelopeType } from "./wsClient";
 import * as wailsClient from "./wailsClient";
-import type { SessionSummary } from "./wailsClient";
+import type { SessionSummary, SessionMode } from "./wailsClient";
 
 interface SessionContextValue {
   sessions: SessionSummary[];
@@ -10,7 +10,7 @@ interface SessionContextValue {
   starting: boolean;
   error: string | null;
   selectSession: (id: string) => void;
-  startSession: (goal: string, topology: string) => Promise<void>;
+  startSession: (goal: string, topology: string, mode: SessionMode) => Promise<void>;
   stopSession: (id: string) => Promise<void>;
   refreshSessions: () => Promise<void>;
   reconnectActiveWs: () => void;
@@ -38,11 +38,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const startSession = useCallback(
-    async (goal: string, topology: string) => {
+    async (goal: string, topology: string, mode: SessionMode) => {
       setStarting(true);
       setError(null);
       try {
-        const result = await wailsClient.startSession(goal, topology);
+        const result = await wailsClient.startSession(goal, topology, mode);
         const client = new SessionWsClient(result.ws_url);
         clientsRef.current.set(result.session_id, client);
         setActiveSessionId(result.session_id);
@@ -79,6 +79,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [activeSessionId]);
 
   const activeWsClient = activeSessionId ? clientsRef.current.get(activeSessionId) ?? null : null;
+
+  // Populate the sidebar with sessions that already existed on the Go side
+  // (started from a prior page instance, e.g. before a WS reconnect or
+  // window reload) — otherwise it stays empty until this page starts one
+  // itself.
+  useEffect(() => {
+    refreshSessions();
+  }, [refreshSessions]);
 
   // Session status (running -> success/failed/cancelled) changes on the Go
   // side without a dedicated "sessions list changed" push; refetch the

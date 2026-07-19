@@ -37,7 +37,12 @@ func (s *SessionAPI) startup(ctx context.Context) {
 		runtime.LogErrorf(ctx, "sessionsRoot: %v", err)
 		root = "sessions"
 	}
-	s.manager = session.NewManager(root)
+	repo, err := repoRoot()
+	if err != nil {
+		runtime.LogErrorf(ctx, "repoRoot: %v", err)
+		repo = "."
+	}
+	s.manager = session.NewManager(root, repo)
 
 	ws, err := wsserver.New(s.manager)
 	if err != nil {
@@ -67,10 +72,31 @@ func sessionsRoot() (string, error) {
 	return filepath.Join(wd, "sessions"), nil
 }
 
-// StartSession creates a new simulated agent session and begins streaming
-// its scripted event sequence over the returned WS URL.
-func (s *SessionAPI) StartSession(goal, topology string) (session.StartSessionResult, error) {
-	sess, err := s.manager.StartSession(goal, topology)
+// repoRoot is the git repo "container" mode checks worktrees out of.
+// TANGENT_REPO_PATH overrides it (e.g. to point at a scratch test repo
+// instead of the real Tangent monorepo); by default it resolves to the
+// Tangent repo root, two levels up from ide/shell (this binary's cwd).
+func repoRoot() (string, error) {
+	if p := os.Getenv("TANGENT_REPO_PATH"); p != "" {
+		return p, nil
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(wd, "..", ".."), nil
+}
+
+// StartSession creates a new agent session — "simulated" (default) plays
+// back simulator.go's scripted sequence, "container" spawns a real,
+// hardened Docker container against a real git worktree — and begins
+// streaming its event sequence over the returned WS URL.
+func (s *SessionAPI) StartSession(goal, topology, mode string) (session.StartSessionResult, error) {
+	sess, err := s.manager.StartSession(session.SessionStartOpts{
+		Goal:     goal,
+		Topology: topology,
+		Mode:     mode,
+	})
 	if err != nil {
 		return session.StartSessionResult{}, err
 	}
@@ -100,7 +126,7 @@ func (s *SessionAPI) GetWorkspaceTree(sessionID string) ([]session.FileNode, err
 	if !ok {
 		return nil, fmt.Errorf("session %q not found", sessionID)
 	}
-	return workspace.Tree(sess.WorktreePath)
+	return workspace.Tree(sess.GetWorktreePath())
 }
 
 func (s *SessionAPI) ReadFile(sessionID, path string) (session.FileContent, error) {
@@ -108,7 +134,7 @@ func (s *SessionAPI) ReadFile(sessionID, path string) (session.FileContent, erro
 	if !ok {
 		return session.FileContent{}, fmt.Errorf("session %q not found", sessionID)
 	}
-	return workspace.Read(sess.WorktreePath, path)
+	return workspace.Read(sess.GetWorktreePath(), path)
 }
 
 func (s *SessionAPI) WriteFile(sessionID, path, content string) error {
@@ -116,7 +142,7 @@ func (s *SessionAPI) WriteFile(sessionID, path, content string) error {
 	if !ok {
 		return fmt.Errorf("session %q not found", sessionID)
 	}
-	return workspace.Write(sess.WorktreePath, path, content)
+	return workspace.Write(sess.GetWorktreePath(), path, content)
 }
 
 func (s *SessionAPI) GetTrace(sessionID string) ([]session.TraceEntry, error) {

@@ -1,7 +1,12 @@
 import { useState } from "react";
 import { useSession } from "../lib/SessionContext";
+import type { SessionMode } from "../lib/wailsClient";
 
 const TOPOLOGIES = ["coding_swarm", "software_delivery", "software_delivery_lite", "research_swarm"];
+const MODES: { value: SessionMode; label: string }[] = [
+  { value: "simulated", label: "Simulated (scripted, no Docker)" },
+  { value: "container", label: "Container (real Docker + git worktree)" },
+];
 
 const STATUS_COLOR: Record<string, string> = {
   running: "#e8b339",
@@ -14,11 +19,22 @@ export default function SessionList() {
   const { sessions, activeSessionId, starting, error, selectSession, startSession, stopSession } = useSession();
   const [goal, setGoal] = useState("Add a Widget/Owner schema and ship it to staging");
   const [topology, setTopology] = useState(TOPOLOGIES[0]);
+  const [mode, setMode] = useState<SessionMode>("simulated");
+  // Container-mode sessions keep their (now-exited) container around until
+  // an explicit Stop, even after the run finishes — a session stop isn't
+  // implicit at completion. Track which ones we've already cleaned up so
+  // the button doesn't linger forever after a successful removal.
+  const [cleanedUp, setCleanedUp] = useState<Set<string>>(new Set());
+
+  const handleStop = async (id: string) => {
+    await stopSession(id);
+    setCleanedUp((prev) => new Set(prev).add(id));
+  };
 
   const handleStart = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!goal.trim() || starting) return;
-    await startSession(goal.trim(), topology);
+    await startSession(goal.trim(), topology, mode);
   };
 
   return (
@@ -34,6 +50,16 @@ export default function SessionList() {
             {TOPOLOGIES.map((t) => (
               <option key={t} value={t}>
                 {t}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Mode
+          <select value={mode} onChange={(e) => setMode(e.target.value as SessionMode)}>
+            {MODES.map((m) => (
+              <option key={m.value} value={m.value}>
+                {m.label}
               </option>
             ))}
           </select>
@@ -61,17 +87,18 @@ export default function SessionList() {
             </div>
             <div className="session-list__meta">
               <span>{s.topology}</span>
+              <span className={`session-list__mode session-list__mode--${s.mode}`}>{s.mode}</span>
               <span>{s.status}</span>
             </div>
-            {s.status === "running" && (
+            {(s.status === "running" || (s.mode === "container" && !cleanedUp.has(s.session_id))) && (
               <button
                 className="session-list__stop"
                 onClick={(e) => {
                   e.stopPropagation();
-                  stopSession(s.session_id);
+                  handleStop(s.session_id);
                 }}
               >
-                Stop
+                {s.status === "running" ? "Stop" : "Remove container"}
               </button>
             )}
           </li>

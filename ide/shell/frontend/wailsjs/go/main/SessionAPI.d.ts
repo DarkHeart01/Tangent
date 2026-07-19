@@ -16,7 +16,7 @@ export function ReadFile(arg1:string,arg2:string):Promise<session.FileContent>;
 
 export function ResolveGate(arg1:string,arg2:string,arg3:string):Promise<void>;
 
-export function StartSession(arg1:string,arg2:string):Promise<session.StartSessionResult>;
+export function StartSession(arg1:string,arg2:string,arg3:string):Promise<session.StartSessionResult>;
 
 export function StopSession(arg1:string):Promise<void>;
 

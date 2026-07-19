@@ -30,8 +30,8 @@ export function ResolveGate(arg1, arg2, arg3) {
   return window['go']['main']['SessionAPI']['ResolveGate'](arg1, arg2, arg3);
 }
 
-export function StartSession(arg1, arg2) {
-  return window['go']['main']['SessionAPI']['StartSession'](arg1, arg2);
+export function StartSession(arg1, arg2, arg3) {
+  return window['go']['main']['SessionAPI']['StartSession'](arg1, arg2, arg3);
 }
 
 export function StopSession(arg1) {

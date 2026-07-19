@@ -10,9 +10,10 @@ export type TraceEntry = session.TraceEntry;
 export type CostReport = session.CostReport;
 export type StartSessionResult = session.StartSessionResult;
 export type ContractEntry = session.ContractEntry;
+export type SessionMode = "simulated" | "container";
 
-export const startSession = (goal: string, topology: string): Promise<StartSessionResult> =>
-  SessionAPI.StartSession(goal, topology);
+export const startSession = (goal: string, topology: string, mode: SessionMode): Promise<StartSessionResult> =>
+  SessionAPI.StartSession(goal, topology, mode);
 
 export const stopSession = (sessionId: string): Promise<void> => SessionAPI.StopSession(sessionId);
 

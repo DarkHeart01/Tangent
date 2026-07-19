@@ -168,6 +168,7 @@ export namespace session {
 	    session_id: string;
 	    goal: string;
 	    topology: string;
+	    mode: string;
 	    status: string;
 	    started_at: string;
 	    ended_at?: string;
@@ -181,6 +182,7 @@ export namespace session {
 	        this.session_id = source["session_id"];
 	        this.goal = source["goal"];
 	        this.topology = source["topology"];
+	        this.mode = source["mode"];
 	        this.status = source["status"];
 	        this.started_at = source["started_at"];
 	        this.ended_at = source["ended_at"];
