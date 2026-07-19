@@ -1,0 +1,6 @@
+build/bin
+node_modules
+frontend/dist
+sessions/
+wails_dev_stdout.log
+wails_dev_stderr.log
