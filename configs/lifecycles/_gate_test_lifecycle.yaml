@@ -1,0 +1,35 @@
+# TEMPORARY fixture for real daemon phase-gate end-to-end testing.
+# Two trivial phases, no artifact contracts, one human_approval_gate.
+# Not for production use — delete after the test session referencing it is done.
+name: _gate_test_lifecycle
+description: >
+  Minimal 2-phase lifecycle used only to exercise the real phase-approval
+  gate through the Go daemon and a real container, with no artifact-contract
+  dependencies to keep the test deterministic.
+
+budget_allocation:
+  phase_one: 50
+  phase_two: 50
+
+phases:
+  - id: phase_one
+    name: Phase One
+    description: >
+      Trivial first phase — write a one-line status file. No gate.
+    default_agents:
+      - _gate_test_agent
+    required_input_artifact_types: []
+    required_output_artifact_types: []
+    human_approval_gate: false
+    on_failure: abort
+
+  - id: phase_two
+    name: Phase Two
+    description: >
+      Trivial second phase, gated behind human approval before it can run.
+    default_agents:
+      - _gate_test_agent
+    required_input_artifact_types: []
+    required_output_artifact_types: []
+    human_approval_gate: true
+    on_failure: abort

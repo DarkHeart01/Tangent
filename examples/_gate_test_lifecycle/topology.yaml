@@ -1,0 +1,30 @@
+name: _gate_test_lifecycle
+description: |
+  TEMPORARY fixture for real daemon+container end-to-end gate testing
+  (lifecycle phase-approval path). Not for production use — delete after
+  the test session that references it is done.
+
+orchestrator: _gate_test_agent
+
+agents:
+  - role: _gate_test_agent
+    count: 1
+    tools_override: [filesystem, self_reflect]
+
+coordination:
+  strategy: lifecycle
+  lifecycle: _gate_test_lifecycle
+  max_subswarm_size: 1
+  consensus_protocol: majority
+  debate_max_rounds: 1
+  approval_gates: true
+
+budget:
+  max_cost_usd: 0.25
+  warn_at_fraction: 0.8
+
+safety:
+  mode: interactive
+  tool_allowlist: [filesystem, self_reflect]
+
+memory_backend: local

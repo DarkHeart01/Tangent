@@ -547,7 +547,17 @@ class SwarmRuntime:
 
             # ── Human approval gate ───────────────────────────────────────────
             has_gate = phase.get("human_approval_gate", False)
-            if has_gate and approval_gates and safety_mode == "interactive":
+            # safety_mode alone used to gate this ("== interactive"), but every
+            # daemon-launched session runs with --safety-mode auto regardless
+            # of the topology's own safety.mode (pyengine.go's
+            # LaunchSwarmProcess hardcodes it, for reasons unrelated to phase
+            # gating) — so this silently never paused when run through the
+            # daemon. self._on_gate_request being set means a real external
+            # resolution path exists (the daemon HTTP gate, resolved via the
+            # frontend's ResolveGate) independent of safety_mode, so it must
+            # gate on its own, not only through safety_mode. Do not "simplify"
+            # this back to `safety_mode == "interactive"` alone.
+            if has_gate and approval_gates and (self._on_gate_request is not None or safety_mode == "interactive"):
                 self._emit("phase_gate_pending", phase_id=phase_id, phase_name=phase_name)
                 if self._on_gate_request:
                     approved = await self._on_gate_request(phase_id, phase_name)
