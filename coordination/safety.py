@@ -219,7 +219,22 @@ class SafetyGate:
         self._quota.check_and_increment(tool_name, agent_id)
 
         # 4. Side-effect confirmation gate
-        if side_effect_level in self._config.require_confirmation_for:
+        # human_input is excluded regardless of require_confirmation_for's
+        # contents (its side_effect_level is mutates-external, so it would
+        # otherwise match the default require_confirmation_for=
+        # ["mutates-external"]). Its own question-gate (confirm via
+        # tools/human_input/handler.py's _ws_requester / the daemon's
+        # kind: "question" gate) IS the human-interaction point already —
+        # gating it a second time here isn't defense in depth, it's a
+        # generic approve/reject prompt standing in front of the real
+        # question. Confirmed as a real bug, not a hypothetical: with
+        # require_confirmation_for at its default, every human_input call
+        # was blocked here three times in a row (a free-text answer read
+        # as "not approve"), and the agent's own HITL-timeout fallback
+        # silently discarded the real answer and picked its own default
+        # instead of ever reaching the question gate. Do not remove this
+        # exclusion to "simplify" the condition back to the tier check alone.
+        if tool_name != "human_input" and side_effect_level in self._config.require_confirmation_for:
             approved = await confirm_tool_call(
                 tool_name, side_effect_level, inputs, mode=self._config.mode
             )

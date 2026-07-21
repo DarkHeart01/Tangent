@@ -98,6 +98,9 @@ export interface HumanGatePending {
   side_effect_tier?: "mutates-external";
   reason: string;
   proposed_action: string;
+  // "question" kind only — a picker should be shown when this is
+  // present and non-empty, a free-text input otherwise.
+  options?: string[] | null;
 }
 
 export interface HumanGateResolved {

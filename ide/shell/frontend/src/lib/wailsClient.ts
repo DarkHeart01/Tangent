@@ -17,7 +17,10 @@ export const startSession = (goal: string, topology: string, mode: SessionMode):
 
 export const stopSession = (sessionId: string): Promise<void> => SessionAPI.StopSession(sessionId);
 
-export const resolveGate = (gateId: string, decision: "approve" | "reject", note: string): Promise<void> =>
+// decision is "approve" | "reject" for gate_kind "phase"/"tool_call", but the
+// Go side treats this same parameter as the raw free-text or selected-option
+// answer for gate_kind "question" — so it's a plain string here, not a union.
+export const resolveGate = (gateId: string, decision: string, note: string): Promise<void> =>
   SessionAPI.ResolveGate(gateId, decision, note);
 
 export const listSessions = (): Promise<SessionSummary[]> => SessionAPI.ListSessions();

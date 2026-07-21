@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 )
@@ -43,12 +42,13 @@ type gateResponse struct {
 // meaningless for a "question" gate (nothing is being mutated), so it's
 // omitted rather than sent as an empty/placeholder value for that kind.
 type humanGatePendingPayload struct {
-	GateID         string `json:"gate_id"`
-	GateKind       string `json:"gate_kind"` // "phase" | "tool_call" | "question"
-	Phase          string `json:"phase"`
-	SideEffectTier string `json:"side_effect_tier,omitempty"`
-	Reason         string `json:"reason"`
-	ProposedAction string `json:"proposed_action"`
+	GateID         string   `json:"gate_id"`
+	GateKind       string   `json:"gate_kind"` // "phase" | "tool_call" | "question"
+	Phase          string   `json:"phase"`
+	SideEffectTier string   `json:"side_effect_tier,omitempty"`
+	Reason         string   `json:"reason"`
+	ProposedAction string   `json:"proposed_action"`
+	Options        []string `json:"options,omitempty"` // "question" kind only
 }
 
 // Decision carries whatever ResolveGate's decision parameter was passed:
@@ -125,6 +125,7 @@ func (s *Server) handleGate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var phase, reason, proposedAction, tier, gateKind string
+	var options []string
 	switch req.Kind {
 	case "phase":
 		gateKind = "phase"
@@ -143,11 +144,12 @@ func (s *Server) handleGate(w http.ResponseWriter, r *http.Request) {
 	case "question":
 		// No side_effect_tier — nothing is being mutated, a question is
 		// just waiting on a real answer (or a real frontend to relay one).
+		// options is passed through structured (not flattened into a
+		// display string) so the frontend can render a real picker rather
+		// than parsing free text back out of proposed_action.
 		gateKind = "question"
 		reason = req.Prompt
-		if len(req.Options) > 0 {
-			proposedAction = "Options: " + strings.Join(req.Options, ", ")
-		}
+		options = req.Options
 	default:
 		http.Error(w, "unknown gate kind (want \"phase\", \"tool_call\", or \"question\")", http.StatusBadRequest)
 		return
@@ -158,7 +160,7 @@ func (s *Server) handleGate(w http.ResponseWriter, r *http.Request) {
 
 	s.emit(sessionID, "human_gate.pending", humanGatePendingPayload{
 		GateID: gateID, GateKind: gateKind, Phase: phase, SideEffectTier: tier,
-		Reason: reason, ProposedAction: proposedAction,
+		Reason: reason, ProposedAction: proposedAction, Options: options,
 	})
 
 	timeout := s.gateTimeout

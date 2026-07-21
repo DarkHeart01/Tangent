@@ -282,6 +282,33 @@
   border-radius: 4px;
 }
 
+.human-gate-banner__options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.human-gate-banner__option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #d9c68e;
+  cursor: pointer;
+}
+
+.human-gate-banner__text-input {
+  margin-top: 6px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid #5a4a1c;
+  background: #21190a;
+  color: #f0c65c;
+  font-size: 12px;
+  min-width: 320px;
+}
+
 .human-gate-banner__buttons {
   display: flex;
   gap: 8px;
