@@ -122,6 +122,10 @@ swarm run examples/software_delivery/topology.yaml \
   --goal "Build a task management API with user authentication"
 ```
 
+## Tangent IDE
+
+The Wails desktop IDE shell provides the VS Code-style workspace, Monaco editor, Explorer, local file operations, Git Source Control, conditional authenticated GitHub PR integration, resizable Agent Swarm monitor, bottom panels, recent-project handling, and streamed session output. See the [Tangent IDE shell README](ide/shell/README.md) for the current implementation, development commands, and known boundaries.
+
 ---
 
 ## 8-Phase Software Delivery Lifecycle

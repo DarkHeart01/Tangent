@@ -91,6 +91,11 @@ export class SessionWsClient {
     this.open();
   }
 
+  /** Send a control frame to the session stream when the backend supports it. */
+  send(payload: Record<string, unknown>) {
+    if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(payload));
+  }
+
   close() {
     this.closed = true;
     this.socket?.close();

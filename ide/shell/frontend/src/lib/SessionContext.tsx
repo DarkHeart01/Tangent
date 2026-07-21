@@ -10,6 +10,7 @@ interface SessionContextValue {
   starting: boolean;
   error: string | null;
   selectSession: (id: string) => void;
+  newSession: () => void;
   startSession: (goal: string, topology: string, mode: SessionMode) => Promise<void>;
   stopSession: (id: string) => Promise<void>;
   refreshSessions: () => Promise<void>;
@@ -29,6 +30,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const clientsRef = useRef<Map<string, SessionWsClient>>(new Map());
 
   const refreshSessions = useCallback(async () => {
+    if (!wailsClient.isWailsDesktop()) {
+      // Browser/Vite preview has no bound Go session API. Keep the setup view
+      // usable without surfacing a misleading "window.go.main" exception.
+      setSessions([]);
+      return;
+    }
     try {
       const list = await wailsClient.listSessions();
       setSessions(list);
@@ -41,6 +48,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     async (goal: string, topology: string, mode: SessionMode) => {
       setStarting(true);
       setError(null);
+      if (!wailsClient.isWailsDesktop()) {
+        setError("Start Session is available in the Wails desktop application.");
+        setStarting(false);
+        return;
+      }
       try {
         const result = await wailsClient.startSession(goal, topology, mode);
         const client = new SessionWsClient(result.ws_url);
@@ -58,6 +70,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const stopSession = useCallback(
     async (id: string) => {
+      if (!wailsClient.isWailsDesktop()) {
+        setError("Stop Session is available in the Wails desktop application.");
+        return;
+      }
       try {
         await wailsClient.stopSession(id);
         await refreshSessions();
@@ -70,6 +86,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const selectSession = useCallback((id: string) => {
     setActiveSessionId(id);
+  }, []);
+
+  const newSession = useCallback(() => {
+    setActiveSessionId(null);
+    setError(null);
   }, []);
 
   const reconnectActiveWs = useCallback(() => {
@@ -106,12 +127,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       starting,
       error,
       selectSession,
+      newSession,
       startSession,
       stopSession,
       refreshSessions,
       reconnectActiveWs,
     }),
-    [sessions, activeSessionId, activeWsClient, starting, error, selectSession, startSession, stopSession, refreshSessions, reconnectActiveWs],
+    [sessions, activeSessionId, activeWsClient, starting, error, selectSession, newSession, startSession, stopSession, refreshSessions, reconnectActiveWs],
   );
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;

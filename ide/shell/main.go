@@ -32,6 +32,7 @@ func main() {
 	})
 
 	if err != nil {
+		appendLog("[fatal] wails.Run: " + err.Error())
 		println("Error:", err.Error())
 	}
 }

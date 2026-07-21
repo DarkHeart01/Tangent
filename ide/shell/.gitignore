@@ -1,6 +1,23 @@
-build/bin
-node_modules
-frontend/dist
+# ── Wails build output (never push binaries / generated icons) ──
+build/bin/
+build/
+*.exe
+*.syso
+
+# ── Node / frontend build artifacts ──
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# ── Runtime data & logs (created by the running app) ──
 sessions/
+*.log
+tangent-ide.log
 wails_dev_stdout.log
 wails_dev_stderr.log
+
+# ── Secrets ── the swarm reads the repo-root .env; guard here too in case a
+# stray one lands in ide/shell (e.g. via TANGENT_REPO_PATH or manual copy).
+.env
+.env.*
+!.env.example
