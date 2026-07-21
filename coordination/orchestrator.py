@@ -168,6 +168,33 @@ class SwarmRuntime:
         resp.raise_for_status()
         return resp.json()["approved"]
 
+    async def _daemon_ws_requester(
+        self, prompt_text: str, options: Optional[list[str]], timeout: float
+    ) -> str:
+        """Daemon-aware counterpart to api/server.py's request_human_input —
+        registered as tools/human_input/handler.py's _ws_requester so a
+        daemon-launched session's human_input tool calls route through the
+        Go daemon's execapi gate (kind: "question") instead of silently
+        auto-approving. Timeout is the tool's own per-call timeout (not the
+        fixed 10-minute default used for phase/tool_call gates), so the
+        request timeout must track it rather than a fixed generous value.
+        """
+        import httpx
+
+        async with httpx.AsyncClient(timeout=timeout + 30) as client:
+            resp = await client.post(
+                f"{daemon_client.DAEMON_URL}/sessions/{daemon_client.SESSION_ID}/gate",
+                json={
+                    "kind": "question",
+                    "prompt": prompt_text,
+                    "options": options,
+                    "timeout_seconds": timeout,
+                },
+                headers={"Authorization": f"Bearer {daemon_client.DAEMON_TOKEN}"},
+            )
+        resp.raise_for_status()
+        return resp.json()["response"]
+
     # Fields the frontend keys off directly — promoted to the top level of the
     # emitted event; everything else nests under "detail".
     _EVENT_TOP_LEVEL_KEYS = ("phase_id", "phase_name", "agent_id", "role", "request_id")
@@ -195,6 +222,20 @@ class SwarmRuntime:
         import tools.code_index_build.handler as cib_h
 
         hi.set_safety_mode(self._safety_mode)
+        # human_input's own auto-mode short-circuit runs BEFORE it ever checks
+        # whether a real requester is registered (tools/human_input/handler.py:
+        # `if _safety_mode == "auto": return ...` comes first, `if _ws_requester
+        # is not None:` comes second) — so without this, every daemon-launched
+        # session (which always runs with --safety-mode auto, see
+        # pyengine.go/LaunchSwarmProcess) would silently auto-approve every
+        # human_input call with a placeholder "proceed" response, the same
+        # shape of bug _daemon_gate_request above was written to close for
+        # phase gates. Registering a daemon-backed requester here doesn't fix
+        # that ordering by itself — see the `_ws_requester is None` check
+        # added to handler.py's short-circuit — but this is where the daemon
+        # learns a real requester exists at all.
+        if daemon_client.DAEMON_URL:
+            hi.set_ws_requester(self._daemon_ws_requester)
 
         if self._code_searcher:
             cs_h.set_searcher(self._code_searcher)

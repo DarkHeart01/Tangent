@@ -106,15 +106,16 @@ type FileChanged struct {
 
 type HumanGatePending struct {
 	GateID         string `json:"gate_id"`
+	GateKind       string `json:"gate_kind"` // "phase" | "tool_call" | "question"
 	Phase          string `json:"phase"`
-	SideEffectTier string `json:"side_effect_tier"` // mutates-external
+	SideEffectTier string `json:"side_effect_tier,omitempty"` // mutates-external; absent for "question"
 	Reason         string `json:"reason"`
 	ProposedAction string `json:"proposed_action"`
 }
 
 type HumanGateResolved struct {
 	GateID   string `json:"gate_id"`
-	Decision string `json:"decision"` // approve | reject
+	Decision string `json:"decision"` // approve | reject | proceed | free-text answer (for "question" gates)
 	Note     string `json:"note,omitempty"`
 }
 

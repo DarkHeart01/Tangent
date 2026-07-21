@@ -151,7 +151,7 @@ func runSimulator(sess *Session) {
 	gateID := "gate-1"
 	gateCh := sess.registerGate(gateID)
 	sess.Emit(EventHumanGatePending, HumanGatePending{
-		GateID: gateID, Phase: "contracting", SideEffectTier: "mutates-external",
+		GateID: gateID, GateKind: "tool_call", Phase: "contracting", SideEffectTier: "mutates-external",
 		Reason:         "Deploying to staging is an external side effect and requires human approval.",
 		ProposedAction: "Run deploy_staging on branch feature/widgets",
 	})

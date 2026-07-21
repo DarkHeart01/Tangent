@@ -39,7 +39,17 @@ class HumanInputHandler(ToolHandler):
         prompt_text: str = inputs["prompt"]
         options: Optional[List[str]] = inputs.get("options")
 
-        if _safety_mode == "auto":
+        # _safety_mode alone used to short-circuit here ("== auto"), but every
+        # daemon-launched session runs with --safety-mode auto regardless of
+        # whether a real requester is registered (pyengine.go's
+        # LaunchSwarmProcess hardcodes it) — so this silently auto-approved
+        # every human_input call in daemon mode, the same shape of bug fixed
+        # for the lifecycle phase gate. _ws_requester being set means a real
+        # answer channel exists (the daemon's WS/question gate, or a real
+        # frontend), so auto-mode must only short-circuit when there is no
+        # requester to actually ask. Do not "simplify" this back to
+        # `_safety_mode == "auto"` alone.
+        if _safety_mode == "auto" and _ws_requester is None:
             _log_warn("human_input skipped in auto safety mode — auto-approving")
             return {"response": "proceed", "auto_approved": True}
 

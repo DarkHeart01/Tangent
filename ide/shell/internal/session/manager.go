@@ -460,9 +460,14 @@ func (m *Manager) StopSession(sessionID string) error {
 // share one gate_id namespace, so the frontend's single ResolveGate call
 // works no matter which produced the pending gate.
 func (m *Manager) ResolveGate(gateID, decision, note string) error {
-	if decision != "approve" && decision != "reject" {
-		return fmt.Errorf("decision must be 'approve' or 'reject', got %q", decision)
-	}
+	// decision used to be validated as strictly "approve"/"reject" here, but
+	// a "question"-kind gate (execapi/gate.go's kind: "question", backing
+	// the human_input tool) passes the caller's raw free-text or
+	// selected-option answer through this same parameter — Manager has no
+	// visibility into which kind a given gate_id belongs to (only
+	// execapi's gateStore does), so it can't validate the shape here.
+	// simulator.go's own gate consumer does its own `== "approve"` check,
+	// unaffected by this no longer being pre-validated.
 	m.mu.RLock()
 	for _, sess := range m.sessions {
 		if err := sess.resolveGate(gateID, decision, note); err == nil {

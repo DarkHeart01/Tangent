@@ -91,8 +91,11 @@ export interface FileChanged {
 
 export interface HumanGatePending {
   gate_id: string;
+  gate_kind: "phase" | "tool_call" | "question";
   phase: string;
-  side_effect_tier: "mutates-external";
+  // Absent for gate_kind "question" — nothing is being mutated by a plain
+  // question, so there's no side-effect tier to show.
+  side_effect_tier?: "mutates-external";
   reason: string;
   proposed_action: string;
 }
