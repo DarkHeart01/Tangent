@@ -18,9 +18,10 @@ import (
 // in-memory session manager and the WS server that streams each session's
 // scripted event sequence.
 type SessionAPI struct {
-	ctx     context.Context
-	manager *session.Manager
-	ws      *wsserver.Server
+	ctx       context.Context
+	manager   *session.Manager
+	ws        *wsserver.Server
+	terminals *TerminalManager
 }
 
 func NewSessionAPI() *SessionAPI {
@@ -31,6 +32,8 @@ func NewSessionAPI() *SessionAPI {
 // in-memory session manager and the localhost-only WS event server.
 func (s *SessionAPI) startup(ctx context.Context) {
 	s.ctx = ctx
+	appendLog("[startup] Tangent IDE backend starting")
+	s.terminals = NewTerminalManager(ctx)
 
 	root, err := sessionsRoot()
 	if err != nil {
@@ -59,6 +62,10 @@ func (s *SessionAPI) startup(ctx context.Context) {
 }
 
 func (s *SessionAPI) shutdown(ctx context.Context) {
+	appendLog("[shutdown] Tangent IDE backend stopping")
+	if s.terminals != nil {
+		s.terminals.CloseAll()
+	}
 	// Stop every running container-mode session first (kills swarm
 	// subprocesses, removes containers) so a graceful app close never
 	// leaves one orphaned — see session.Manager.Shutdown.

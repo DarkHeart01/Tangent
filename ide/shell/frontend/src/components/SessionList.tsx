@@ -1,109 +1,103 @@
-import { useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSession } from "../lib/SessionContext";
+import * as wailsClient from "../lib/wailsClient";
 import type { SessionMode } from "../lib/wailsClient";
 
 const TOPOLOGIES = ["coding_swarm", "software_delivery", "software_delivery_lite", "research_swarm"];
-const MODES: { value: SessionMode; label: string }[] = [
-  { value: "simulated", label: "Simulated (scripted, no Docker)" },
-  { value: "container", label: "Container (real Docker + git worktree)" },
+const MODES: { value: SessionMode; label: string; detail: string }[] = [
+  { value: "simulated", label: "Simulated", detail: "scripted, no Docker / key" },
+  { value: "container", label: "Container", detail: "real Docker + swarm" },
 ];
+const STATUS_COLOR: Record<string, string> = { running: "#d29922", success: "#3fb950", failed: "#f85149", cancelled: "#8b949e" };
 
-const STATUS_COLOR: Record<string, string> = {
-  running: "#e8b339",
-  success: "#3fb950",
-  failed: "#f85149",
-  cancelled: "#8b949e",
-};
+function ProviderKeyPanel() {
+  const [status, setStatus] = useState<wailsClient.ProviderKeyStatus | null>(null);
+  const [provider, setProvider] = useState("openrouter");
+  const [key, setKey] = useState("");
+  const [model, setModel] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const nativeDesktop = wailsClient.isWailsDesktop();
+
+  const refresh = useCallback(async () => {
+    if (!nativeDesktop) return;
+    try {
+      const next = await wailsClient.getProviderKeyStatus();
+      setStatus(next);
+      setProvider((current) => next.active_provider || current);
+      setModel((current) => current || next.default_model || "");
+    } catch (error) { setNote(String(error)); }
+  }, [nativeDesktop]);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  const save = async () => {
+    if (!key.trim()) { setNote("Enter a key first."); return; }
+    setSaving(true); setNote(null);
+    try {
+      await wailsClient.setProviderKey(provider, key.trim(), model.trim());
+      setKey("");
+      setNote(`Saved to ${status?.env_path ?? ".env"}`);
+      await refresh();
+    } catch (error) { setNote(String(error)); }
+    finally { setSaving(false); }
+  };
+
+  const configured = status?.configured?.[provider];
+  return <details className="provider-panel">
+    <summary>Provider API key {configured ? <span className="provider-panel__ok">● {provider} set</span> : <span className="provider-panel__missing">not set</span>}</summary>
+    {!nativeDesktop ? <p className="muted-copy">Run the desktop app to set the key.</p> : <>
+      <label className="select-field"><span>PROVIDER</span>
+        <select value={provider} onChange={(event) => setProvider(event.target.value)}>
+          {(status?.known_providers ?? ["openrouter", "groq", "gemini", "openai"]).map((id) => <option key={id} value={id}>{id}{status?.configured?.[id] ? " ✓" : ""}</option>)}
+        </select>
+      </label>
+      <input className="provider-panel__input" type="password" value={key} onChange={(event) => setKey(event.target.value)} placeholder={provider === "openrouter" ? "sk-or-v1-…" : "API key"} aria-label="Provider API key" />
+      <input className="provider-panel__input" value={model} onChange={(event) => setModel(event.target.value)} placeholder="Default model (optional, e.g. deepseek/deepseek-v4-pro)" aria-label="Default model" />
+      <button className="provider-panel__save" onClick={() => void save()} disabled={saving || !key.trim()}>{saving ? "Saving…" : "Save key"}</button>
+      {note && <p className="provider-panel__note">{note}</p>}
+      <p className="muted-copy">Written to the repo-root <code>.env</code>; the swarm loads it on start (container mode).</p>
+    </>}
+  </details>;
+}
 
 export default function SessionList() {
-  const { sessions, activeSessionId, starting, error, selectSession, startSession, stopSession } = useSession();
+  const { sessions, activeSessionId, starting, error, startSession, stopSession } = useSession();
   const [goal, setGoal] = useState("Add a Widget/Owner schema and ship it to staging");
   const [topology, setTopology] = useState(TOPOLOGIES[0]);
   const [mode, setMode] = useState<SessionMode>("simulated");
-  // Container-mode sessions keep their (now-exited) container around until
-  // an explicit Stop, even after the run finishes — a session stop isn't
-  // implicit at completion. Track which ones we've already cleaned up so
-  // the button doesn't linger forever after a successful removal.
-  const [cleanedUp, setCleanedUp] = useState<Set<string>>(new Set());
+  const [stopping, setStopping] = useState(false);
+  const recentGoals = useMemo(() => Array.from(new Set(sessions.map((session) => session.goal))).slice(-6).reverse(), [sessions]);
+  const active = sessions.find((session) => session.session_id === activeSessionId);
+  const nativeDesktop = wailsClient.isWailsDesktop();
 
-  const handleStop = async (id: string) => {
-    await stopSession(id);
-    setCleanedUp((prev) => new Set(prev).add(id));
-  };
-
-  const handleStart = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const start = async (event: React.FormEvent) => {
+    event.preventDefault();
     if (!goal.trim() || starting) return;
     await startSession(goal.trim(), topology, mode);
   };
 
-  return (
-    <div className="session-list">
-      <form className="session-list__form" onSubmit={handleStart}>
-        <label>
-          Goal
-          <textarea value={goal} onChange={(e) => setGoal(e.target.value)} rows={3} />
-        </label>
-        <label>
-          Topology
-          <select value={topology} onChange={(e) => setTopology(e.target.value)}>
-            {TOPOLOGIES.map((t) => (
-              <option key={t} value={t}>
-                {t}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Mode
-          <select value={mode} onChange={(e) => setMode(e.target.value as SessionMode)}>
-            {MODES.map((m) => (
-              <option key={m.value} value={m.value}>
-                {m.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button type="submit" disabled={starting}>
-          {starting ? "Starting…" : "Start Session"}
-        </button>
-      </form>
+  const stop = async () => {
+    if (!activeSessionId || stopping) return;
+    setStopping(true);
+    try { await stopSession(activeSessionId); } finally { setStopping(false); }
+  };
 
-      {error && <div className="session-list__error">{error}</div>}
+  if (activeSessionId) return <div className="swarm-session-strip">
+    <span className="status-dot" style={{ background: STATUS_COLOR[active?.status ?? "running"] }} />
+    <span className="swarm-session-strip__goal" title={active?.goal}>{active?.goal ?? "Active session"}</span>
+    <span className="swarm-session-strip__mode">{active?.mode ?? "simulated"}</span>
+    <button className="swarm-session-strip__stop" onClick={() => void stop()} disabled={stopping || (active?.status !== undefined && active.status !== "running")} title="Stop this session">{stopping ? "Stopping…" : "Stop"}</button>
+  </div>;
 
-      <ul className="session-list__items">
-        {sessions.length === 0 && <li className="session-list__empty">No sessions yet</li>}
-        {sessions.map((s) => (
-          <li
-            key={s.session_id}
-            className={`session-list__item ${s.session_id === activeSessionId ? "is-active" : ""}`}
-            onClick={() => selectSession(s.session_id)}
-          >
-            <div className="session-list__item-header">
-              <span className="session-list__dot" style={{ background: STATUS_COLOR[s.status] ?? "#8b949e" }} />
-              <span className="session-list__goal" title={s.goal}>
-                {s.goal}
-              </span>
-            </div>
-            <div className="session-list__meta">
-              <span>{s.topology}</span>
-              <span className={`session-list__mode session-list__mode--${s.mode}`}>{s.mode}</span>
-              <span>{s.status}</span>
-            </div>
-            {(s.status === "running" || (s.mode === "container" && !cleanedUp.has(s.session_id))) && (
-              <button
-                className="session-list__stop"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleStop(s.session_id);
-                }}
-              >
-                {s.status === "running" ? "Stop" : "Remove container"}
-              </button>
-            )}
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
+  return <div className="session-setup">
+    <div className="goal-field"><label htmlFor="goal">GOAL</label><textarea id="goal" value={goal} onChange={(event) => setGoal(event.target.value)} rows={3} placeholder="Describe what the swarm should deliver…" /></div>
+    <label className="select-field" htmlFor="topology"><span>TOPOLOGY</span><select id="topology" value={topology} onChange={(event) => setTopology(event.target.value)}>{TOPOLOGIES.map((item) => <option key={item}>{item}</option>)}</select></label>
+    <fieldset className="mode-field"><legend>MODE</legend><div className="mode-cards">{MODES.map((item) => <button type="button" key={item.value} className={`mode-card ${mode === item.value ? "is-active" : ""}`} onClick={() => setMode(item.value)}><strong>{item.label}</strong><small>{item.detail}</small></button>)}</div></fieldset>
+    {mode === "container" && <ProviderKeyPanel />}
+    <button className="start-session-button" onClick={start} disabled={starting || !goal.trim() || !nativeDesktop} title={nativeDesktop ? "Start Session" : "Run wails dev to start a native session"}>{starting ? "Starting session…" : "Start Session"}</button>
+    {!nativeDesktop && <div className="session-runtime-note">Browser preview is read-only. Run <code>wails dev</code> to start Swarm sessions and use the native terminal.</div>}
+    {error && <div className="session-error">{error}</div>}
+    <section className="recent-goals"><h3>RECENT GOALS</h3>{recentGoals.length ? recentGoals.map((item) => <button key={item} className="recent-goal" onClick={() => setGoal(item)} title={item}>{item}</button>) : <p className="muted-copy">Your previous goals will appear here.</p>}</section>
+  </div>;
 }

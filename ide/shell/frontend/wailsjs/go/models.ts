@@ -1,3 +1,246 @@
+export namespace main {
+	
+	export class GitBranch {
+	    name: string;
+	    current: boolean;
+	    remote: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new GitBranch(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.current = source["current"];
+	        this.remote = source["remote"];
+	    }
+	}
+	export class GitDiff {
+	    path: string;
+	    original: string;
+	    modified: string;
+	    staged: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new GitDiff(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.original = source["original"];
+	        this.modified = source["modified"];
+	        this.staged = source["staged"];
+	    }
+	}
+	export class GitFileStatus {
+	    path: string;
+	    original_path?: string;
+	    status: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new GitFileStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.original_path = source["original_path"];
+	        this.status = source["status"];
+	    }
+	}
+	export class GitHubCommit {
+	    message: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new GitHubCommit(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.message = source["message"];
+	    }
+	}
+	export class GitHubPR {
+	    exists: boolean;
+	    number: number;
+	    title: string;
+	    author: string;
+	    url: string;
+	    check_status: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new GitHubPR(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.exists = source["exists"];
+	        this.number = source["number"];
+	        this.title = source["title"];
+	        this.author = source["author"];
+	        this.url = source["url"];
+	        this.check_status = source["check_status"];
+	    }
+	}
+	export class GitHubPRListItem {
+	    number: number;
+	    title: string;
+	    author: string;
+	    head_branch: string;
+	    url: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new GitHubPRListItem(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.number = source["number"];
+	        this.title = source["title"];
+	        this.author = source["author"];
+	        this.head_branch = source["head_branch"];
+	        this.url = source["url"];
+	    }
+	}
+	export class GitHubStatus {
+	    available: boolean;
+	    authenticated: boolean;
+	    login: string;
+	    reason: string;
+	    is_github_remote: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new GitHubStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.available = source["available"];
+	        this.authenticated = source["authenticated"];
+	        this.login = source["login"];
+	        this.reason = source["reason"];
+	        this.is_github_remote = source["is_github_remote"];
+	    }
+	}
+	export class GitStatus {
+	    root: string;
+	    branch: string;
+	    ahead: number;
+	    behind: number;
+	    changes: GitFileStatus[];
+	    staged: GitFileStatus[];
+	    conflicts: GitFileStatus[];
+	    ignored: GitFileStatus[];
+	
+	    static createFrom(source: any = {}) {
+	        return new GitStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.root = source["root"];
+	        this.branch = source["branch"];
+	        this.ahead = source["ahead"];
+	        this.behind = source["behind"];
+	        this.changes = this.convertValues(source["changes"], GitFileStatus);
+	        this.staged = this.convertValues(source["staged"], GitFileStatus);
+	        this.conflicts = this.convertValues(source["conflicts"], GitFileStatus);
+	        this.ignored = this.convertValues(source["ignored"], GitFileStatus);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class LocalTerminalInfo {
+	    id: string;
+	    name: string;
+	    cwd: string;
+	    shell: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new LocalTerminalInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.cwd = source["cwd"];
+	        this.shell = source["shell"];
+	    }
+	}
+	export class ProviderKeyStatus {
+	    env_path: string;
+	    active_provider: string;
+	    configured: Record<string, boolean>;
+	    default_model: string;
+	    known_providers: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ProviderKeyStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.env_path = source["env_path"];
+	        this.active_provider = source["active_provider"];
+	        this.configured = source["configured"];
+	        this.default_model = source["default_model"];
+	        this.known_providers = source["known_providers"];
+	    }
+	}
+	export class SearchMatch {
+	    path: string;
+	    line: number;
+	    column: number;
+	    preview: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SearchMatch(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.line = source["line"];
+	        this.column = source["column"];
+	        this.preview = source["preview"];
+	    }
+	}
+	export class WorkspaceInfo {
+	    name: string;
+	    path: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new WorkspaceInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.path = source["path"];
+	    }
+	}
+
+}
+
 export namespace session {
 	
 	export class BudgetUpdate {
