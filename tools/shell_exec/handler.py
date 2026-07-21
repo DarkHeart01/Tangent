@@ -3,24 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import shlex
 from pathlib import Path
 from typing import Any
 
+from core.daemon_client import DAEMON_TOKEN as _DAEMON_TOKEN
+from core.daemon_client import DAEMON_URL as _DAEMON_URL
+from core.daemon_client import SESSION_ID as _SESSION_ID
 from core.exceptions import SafetyError
 from tools.base import ToolHandler
 
 _CWD = Path.cwd()
-
-# Set by the Go daemon (ide/shell) when this process was launched for a
-# container-mode IDE session — see internal/session/pyengine.go. Absent for
-# a standalone `swarm run` from a terminal, which must keep working exactly
-# as before: that's the fallback branch below, unchanged from the original
-# local-exec implementation.
-_DAEMON_URL = os.environ.get("TANGENT_DAEMON_URL")
-_DAEMON_TOKEN = os.environ.get("TANGENT_DAEMON_TOKEN")
-_SESSION_ID = os.environ.get("TANGENT_SESSION_ID")
 
 _DENYLIST = [
     "rm -rf /",

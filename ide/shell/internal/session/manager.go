@@ -453,17 +453,32 @@ func (m *Manager) StopSession(sessionID string) error {
 	return nil
 }
 
+// ResolveGate resolves a pending gate regardless of which mechanism created
+// it: a session's own scripted gate (simulator.go's human_gate.pending) or
+// one registered with the execapi server (the Go daemon's real-swarm phase
+// and tool-call confirmation gates — see internal/execapi/gate.go). Both
+// share one gate_id namespace, so the frontend's single ResolveGate call
+// works no matter which produced the pending gate.
 func (m *Manager) ResolveGate(gateID, decision, note string) error {
 	if decision != "approve" && decision != "reject" {
 		return fmt.Errorf("decision must be 'approve' or 'reject', got %q", decision)
 	}
 	m.mu.RLock()
-	defer m.mu.RUnlock()
 	for _, sess := range m.sessions {
 		if err := sess.resolveGate(gateID, decision, note); err == nil {
+			m.mu.RUnlock()
 			return nil
 		}
 	}
+	m.mu.RUnlock()
+
+	m.execMu.Lock()
+	execServer := m.execAPI
+	m.execMu.Unlock()
+	if execServer != nil && execServer.ResolveGate(gateID, decision, note) {
+		return nil
+	}
+
 	return fmt.Errorf("gate %q not found in any active session", gateID)
 }
 

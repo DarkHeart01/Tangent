@@ -19,6 +19,7 @@ from collections import defaultdict
 from typing import Any, Optional
 
 from configs.schema import SafetyConfig, SideEffectLevel
+from core import daemon_client
 from core.exceptions import SafetyError
 from observability.logutil import get_logger
 
@@ -129,6 +130,9 @@ async def confirm_tool_call(
     if mode == "auto":
         return True
 
+    if daemon_client.DAEMON_URL:
+        return await _daemon_confirm_tool_call(tool_name, side_effect_level, inputs)
+
     from rich.console import Console
     from rich.prompt import Confirm
 
@@ -145,6 +149,35 @@ async def confirm_tool_call(
     if not approved:
         log.info("tool_call_denied", tool=tool_name)
     return approved
+
+
+async def _daemon_confirm_tool_call(
+    tool_name: str, side_effect_level: SideEffectLevel, inputs: dict[str, Any]
+) -> bool:
+    """Daemon-aware counterpart to the rich.Prompt confirmation above —
+    mirrors coordination/orchestrator.py's _daemon_gate_request exactly,
+    routing through the same POST /sessions/{id}/gate primitive with
+    kind: "tool_call" instead of kind: "phase".
+    """
+    import httpx
+
+    args_summary = str(inputs)
+    if len(args_summary) > 200:
+        args_summary = args_summary[:200] + "…"
+
+    async with httpx.AsyncClient(timeout=650) as client:
+        resp = await client.post(
+            f"{daemon_client.DAEMON_URL}/sessions/{daemon_client.SESSION_ID}/gate",
+            json={
+                "kind": "tool_call",
+                "tool_name": tool_name,
+                "side_effect_tier": side_effect_level,
+                "args_summary": args_summary,
+            },
+            headers={"Authorization": f"Bearer {daemon_client.DAEMON_TOKEN}"},
+        )
+    resp.raise_for_status()
+    return resp.json()["approved"]
 
 
 # ── Unified safety gate ───────────────────────────────────────────────────────

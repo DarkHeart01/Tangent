@@ -25,9 +25,11 @@ from typing import Any, Awaitable, Callable, Literal, Optional
 
 from configs.schema import AgentSpec, TopologySpec
 from coordination.bus import MessageBus
+from coordination.safety import SafetyGate
 from coordination.subswarm import SubswarmCoordinator
 from coordination.task_graph import TaskGraph, TaskGraphExecutor
 from coordination.task_queue import RedisStreamTaskQueue
+from core import daemon_client
 from core.agent import Agent
 from core.exceptions import SwarmError
 from core.task import Task, TaskConstraints, TaskResult, TokenUsage
@@ -115,8 +117,56 @@ class SwarmRuntime:
         self._on_event = on_event
         self._on_gate_request = on_gate_request
 
+        # Self-wire a daemon-aware phase gate when running inside a
+        # container-mode IDE session and the caller didn't already supply
+        # one explicitly (see _daemon_gate_request below). This has to
+        # happen here rather than at the SwarmRuntime(...) call site in
+        # cli/main.py's _build_runtime, because _daemon_gate_request's
+        # fallback to _human_phase_gate needs self.trace_id, which isn't
+        # assigned until the line above — a standalone `swarm run` (no
+        # TANGENT_DAEMON_URL) leaves this at whatever was passed in (None
+        # by default), so _run_lifecycle's existing
+        # `if self._on_gate_request: ... else: _human_phase_gate(...)`
+        # fallback is completely unchanged for that case.
+        if self._on_gate_request is None and daemon_client.DAEMON_URL:
+            self._on_gate_request = self._daemon_gate_request
+
+        # Topology-wide safety policy: tool_allowlist + mutates-external (or
+        # configured tier) confirmation. Distinct from each Agent's own
+        # per-role spec.tools check in core/agent.py — one shared instance,
+        # since the circuit breaker and quota tracker it owns need to see
+        # every agent's calls, not just one agent's.
+        self._safety_gate = SafetyGate(topology.safety)
+
         # Wire runtime-injectable tools
         self._wire_tools()
+
+    async def _daemon_gate_request(self, phase_id: str, phase_name: str) -> bool:
+        """Daemon-aware counterpart to _human_phase_gate — routes a
+        lifecycle phase-transition gate through the Go daemon's execapi
+        (POST /sessions/{id}/gate) instead of blocking on this process's own
+        stdin, so a background daemon subprocess with no attached terminal
+        can still genuinely pause for a human decision (resolved by the
+        existing Wails ResolveGate method via the frontend's approve/reject
+        click).
+        """
+        if not daemon_client.DAEMON_URL:
+            return await _human_phase_gate(phase_id, phase_name, self.trace_id)
+
+        import httpx
+
+        # Long enough to comfortably exceed the daemon's own gate timeout
+        # (10 minutes default) — this must not time out before the daemon
+        # does, or a genuine pending approval would look like a network
+        # failure instead of "still waiting".
+        async with httpx.AsyncClient(timeout=650) as client:
+            resp = await client.post(
+                f"{daemon_client.DAEMON_URL}/sessions/{daemon_client.SESSION_ID}/gate",
+                json={"kind": "phase", "phase_id": phase_id, "phase_name": phase_name},
+                headers={"Authorization": f"Bearer {daemon_client.DAEMON_TOKEN}"},
+            )
+        resp.raise_for_status()
+        return resp.json()["approved"]
 
     # Fields the frontend keys off directly — promoted to the top level of the
     # emitted event; everything else nests under "detail".
@@ -212,6 +262,7 @@ class SwarmRuntime:
             code_searcher=self._code_searcher,
             indexing_top_k=self._indexing_top_k,
             on_event=self._on_event,
+            safety_gate=self._safety_gate,
         )
 
     async def _spawn_agent_for_goal(

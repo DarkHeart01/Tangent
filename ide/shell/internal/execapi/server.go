@@ -48,6 +48,9 @@ type Server struct {
 	mu       sync.RWMutex
 	sessions map[string]SessionInfo
 
+	gateStore   *gateStore
+	gateTimeout time.Duration
+
 	port     int
 	listener net.Listener
 	httpSrv  *http.Server
@@ -55,9 +58,10 @@ type Server struct {
 
 func New(dm *docker.DockerManager, emit EmitFunc) *Server {
 	return &Server{
-		docker:   dm,
-		emit:     emit,
-		sessions: make(map[string]SessionInfo),
+		docker:    dm,
+		emit:      emit,
+		sessions:  make(map[string]SessionInfo),
+		gateStore: newGateStore(),
 	}
 }
 
@@ -102,6 +106,7 @@ func (s *Server) Start() (int, error) {
 	mux.HandleFunc("POST /sessions/{session_id}/exec", s.handleExec)
 	mux.HandleFunc("GET /sessions/{session_id}/fs", s.handleFSGet)
 	mux.HandleFunc("PUT /sessions/{session_id}/fs", s.handleFSPut)
+	mux.HandleFunc("POST /sessions/{session_id}/gate", s.handleGate)
 	s.httpSrv = &http.Server{Handler: mux}
 
 	go func() {

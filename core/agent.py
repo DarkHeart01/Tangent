@@ -8,7 +8,10 @@ Custom logic is attached via optional hook functions.  The base class handles:
   - Scratchpad memory management and auto-compaction
   - Token budget and iteration-count enforcement
   - Full observability (tracing spans, cost ledger)
-  - Safety: per-agent tool permission check before every call
+  - Safety: per-agent tool permission check before every call (self.spec.tools),
+    plus the topology-wide SafetyGate (tool_allowlist + mutates-external
+    confirmation) when one is injected — the two check different things and
+    both run.
 """
 
 from __future__ import annotations
@@ -21,10 +24,12 @@ from typing import Any, Callable, Optional
 
 from configs.schema import AgentSpec
 from coordination.bus import MessageBus
+from coordination.safety import SafetyGate
 from core.context_utils import cap_tool_output
 from core.exceptions import (
     BudgetExceededError,
     MaxIterationsError,
+    SafetyError,
     ToolPermissionError,
 )
 from core.message import Message, MessageType
@@ -39,6 +44,22 @@ from providers.base import LLMProvider
 from tools.base import ToolHandler
 
 log = get_logger("agent")
+
+# filesystem's spec.yaml declares a single tool-level side_effect_level
+# (mutates-local) covering all 8 of its operations, but read/list/search/
+# exists are genuinely read-only — every other tool's side_effect_level is
+# already accurate for every call it makes (confirmed against
+# shell_exec/contractor/docker_build/kubernetes_apply/github_actions_api/
+# pagerduty_trigger/web_search/web_fetch/code_search), so this is the one
+# targeted correction rather than a full static per-tool classification.
+_FILESYSTEM_READONLY_OPS = frozenset({"read", "list", "search", "exists"})
+
+
+def _determine_side_effect_tier(name: str, handler: ToolHandler, arguments: dict[str, Any]) -> str:
+    tier = getattr(handler.spec, "side_effect_level", "read-only")
+    if name == "filesystem" and str(arguments.get("operation", "")) in _FILESYSTEM_READONLY_OPS:
+        return "read-only"
+    return tier
 
 
 class Agent:
@@ -60,6 +81,7 @@ class Agent:
         code_searcher: Optional[CodeIndexSearcher] = None,
         indexing_top_k: int = 6,
         on_event: Optional[Callable[[dict], None]] = None,
+        safety_gate: Optional[SafetyGate] = None,
     ) -> None:
         self.id = agent_id or str(uuid.uuid4())
         self.spec = spec
@@ -76,6 +98,7 @@ class Agent:
         self._ledger = ledger
         self._hooks = self._load_hooks(spec.hooks)
         self._on_event = on_event
+        self._safety_gate = safety_gate
 
     def _emit(self, event_type: str, **detail: Any) -> None:
         if self._on_event is None:
@@ -305,7 +328,11 @@ class Agent:
         call_id: str,
         task: Task,
     ) -> dict[str, Any]:
-        # Permission check — return error dict so the LLM can handle it gracefully
+        # Permission check — return error dict so the LLM can handle it gracefully.
+        # This is per-agent (self.spec.tools, from this role's own spec.yaml) and
+        # is distinct from the topology-wide SafetyGate check below: this asks
+        # "can THIS role ever use this tool", SafetyGate asks "does the topology's
+        # tool_allowlist/require_confirmation_for permit THIS call, right now".
         if name not in self.spec.tools:
             log.warning("tool_permission_denied", agent=self.spec.role, tool=name)
             return {"error": f"Tool '{name}' is not in the allowed tools list for role '{self.spec.role}'"}
@@ -314,6 +341,21 @@ class Agent:
             return {"error": f"Tool '{name}' not found in registry"}
 
         handler = self._tools[name]
+
+        if self._safety_gate is not None:
+            tier = _determine_side_effect_tier(name, handler, arguments)
+            try:
+                await self._safety_gate.check(name, tier, arguments, self.id)
+            except SafetyError as exc:
+                # Tagged distinctly (blocked=True) rather than collapsing into
+                # the same {"error": ...} shape a normal tool failure returns —
+                # a denylist/allowlist/confirmation block is a policy decision,
+                # not the tool itself failing.
+                log.warning("tool_blocked", agent=self.spec.role, tool=name, error=str(exc))
+                task.add_trace("tool_blocked", tool=name, error=str(exc))
+                self._emit("tool_result", task_id=task.id, tool=name, call_id=call_id, ok=False, blocked=True, error=str(exc))
+                return {"error": str(exc), "blocked": True}
+
         self._emit("tool_call", task_id=task.id, tool=name, call_id=call_id)
         try:
             result = await handler.run(arguments, agent_id=self.id)

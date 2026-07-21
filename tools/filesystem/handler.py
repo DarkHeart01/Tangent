@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
+from core.daemon_client import DAEMON_TOKEN as _DAEMON_TOKEN
+from core.daemon_client import DAEMON_URL as _DAEMON_URL
+from core.daemon_client import SESSION_ID as _SESSION_ID
 from core.exceptions import SafetyError
 from observability.logutil import get_logger
 from tools.base import ToolHandler
@@ -14,19 +16,6 @@ log = get_logger("tools.filesystem")
 
 _CWD = Path.cwd()
 _BUILT = _CWD / "built"
-
-# Set by the Go daemon (ide/shell) when this process was launched for a
-# container-mode IDE session — see internal/session/pyengine.go. Absent for
-# a standalone `swarm run` from a terminal, which must keep working exactly
-# as before: only read/write route through the daemon (below); the other
-# operations already work correctly against the same worktree either way
-# (this process has direct host filesystem access to it — the daemon route
-# exists for Dashboard tool-call visibility, not sandboxing, unlike
-# shell_exec), so they're left on the local path unconditionally rather
-# than inventing daemon endpoints the plan didn't ask for.
-_DAEMON_URL = os.environ.get("TANGENT_DAEMON_URL")
-_DAEMON_TOKEN = os.environ.get("TANGENT_DAEMON_TOKEN")
-_SESSION_ID = os.environ.get("TANGENT_SESSION_ID")
 
 # Paths that are always read-only project internals — never rerouted to built/
 _INTERNAL_PREFIXES = ("traces", "memory_store", "configs", "agents", "tools",
