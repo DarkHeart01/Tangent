@@ -44,7 +44,13 @@ type ContainerSpawnOpts struct {
 	MemoryLimitMB int    // default 512
 	NanoCPUs      int64  // default 1e9 (1 core)
 	NetworkMode   string // default "none"
+	Labels        map[string]string
 }
+
+// managedLabel marks every container this package spawns, regardless of
+// caller, so CleanupOrphaned can find them after a daemon crash without
+// depending on any in-memory state (which a crash, by definition, loses).
+const managedLabel = "tangent.managed"
 
 func (d *DockerManager) SpawnContainer(ctx context.Context, opts ContainerSpawnOpts) (containerID string, err error) {
 	if opts.MountTarget == "" {
@@ -60,6 +66,11 @@ func (d *DockerManager) SpawnContainer(ctx context.Context, opts ContainerSpawnO
 
 	hostConfig := buildHostConfig(opts)
 
+	labels := map[string]string{managedLabel: "true"}
+	for k, v := range opts.Labels {
+		labels[k] = v
+	}
+
 	cfg := &container.Config{
 		Image:        opts.Image,
 		Cmd:          opts.Cmd,
@@ -68,6 +79,7 @@ func (d *DockerManager) SpawnContainer(ctx context.Context, opts ContainerSpawnO
 		Tty:          false,
 		AttachStdout: true,
 		AttachStderr: true,
+		Labels:       labels,
 	}
 
 	created, err := d.cli.ContainerCreate(ctx, client.ContainerCreateOptions{
@@ -170,6 +182,31 @@ func (d *DockerManager) StopAndRemove(ctx context.Context, containerID string) e
 		return fmt.Errorf("container remove: %w", err)
 	}
 	return nil
+}
+
+// CleanupOrphaned force-removes every container carrying managedLabel. A
+// fresh daemon process has no in-memory session state — Manager's session
+// map always starts empty — so by definition any managedLabel container
+// still present at daemon startup belongs to a *previous* process instance
+// that's no longer around to have cleaned it up itself (crash, kill -9,
+// power loss). Called once, lazily, the first time a container-mode
+// session is started in this process.
+//
+// Known limitation: if two daemon instances are genuinely running at once,
+// this would tear down the other instance's live containers too. Accepted
+// for a single-user desktop dev tool.
+func (d *DockerManager) CleanupOrphaned(ctx context.Context) (removed int, err error) {
+	filters := client.Filters{}.Add("label", managedLabel+"=true")
+	list, err := d.cli.ContainerList(ctx, client.ContainerListOptions{All: true, Filters: filters})
+	if err != nil {
+		return 0, fmt.Errorf("list orphaned containers: %w", err)
+	}
+	for _, c := range list.Items {
+		if stopErr := d.StopAndRemove(ctx, c.ID); stopErr == nil {
+			removed++
+		}
+	}
+	return removed, nil
 }
 
 // lineWriter buffers arbitrary chunk writes and calls onLine once per

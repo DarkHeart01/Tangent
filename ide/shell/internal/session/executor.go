@@ -3,34 +3,38 @@ package session
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"sync"
 
 	"shell/internal/docker"
+	"shell/internal/execapi"
 	"shell/internal/watcher"
 	"shell/internal/worktree"
 )
 
-// Test payload for this step: not a real agent yet. Exercises both a
-// terminal-output path and a file-write path so the WS event contract can
-// be proven end to end against a real container. Swapping Image/Cmd here
-// for a different script (or eventually the real swarm invocation) needs
-// no changes anywhere else in the stack — that's the point of this layer.
+// defaultContainerImage doubles as the base for the persistent sandbox
+// shell_exec runs inside — python:3.12-slim ships coreutils (tail, sh)
+// for the keep-alive process, and python itself for agents that want it.
 const (
 	defaultContainerImage       = "python:3.12-slim"
 	defaultContainerMountTarget = "/workspace"
 )
 
-var defaultContainerCmd = []string{"sh", "-c",
-	`echo "agent starting"; sleep 1; echo "reading workspace"; sleep 1; echo "hello from container" > /workspace/output.txt; sleep 1; echo "writing complete"; sleep 1; echo "agent finished"`,
-}
+// persistentContainerCmd keeps the container alive indefinitely instead of
+// running a one-shot script — Step 4's container lifecycle was
+// spawn-and-exit; this step's is spawn-once-per-session, exec into it
+// repeatedly for every shell_exec call the real swarm run makes.
+var persistentContainerCmd = []string{"tail", "-f", "/dev/null"}
 
 // ContainerExecutor is the real, Docker-backed counterpart to
 // simulator.go: same event contract via the emit hook (session.started,
-// terminal.output, file.changed, session.ended), a real container and a
-// real git worktree underneath instead of a scripted sequence.
+// terminal.output, tool.call/result, file.changed, session.ended), a real
+// container, a real git worktree, and — as of this step — a real swarm
+// engine subprocess underneath instead of a scripted sequence.
 type ContainerExecutor struct {
 	docker   *docker.DockerManager
+	execAPI  *execapi.Server
 	repoPath string
 	emit     func(sessionID, eventType string, payload interface{})
 
@@ -42,25 +46,32 @@ type runningContainer struct {
 	containerID  string
 	worktreePath string
 	cancel       context.CancelFunc
-	finished     bool // set once the container's own process has exited naturally
+	swarmCmd     *exec.Cmd // set once LaunchSwarmProcess succeeds
 }
 
-func NewContainerExecutor(dm *docker.DockerManager, repoPath string, emit func(sessionID, eventType string, payload interface{})) *ContainerExecutor {
+func NewContainerExecutor(dm *docker.DockerManager, execAPI *execapi.Server, repoPath string, emit func(sessionID, eventType string, payload interface{})) *ContainerExecutor {
 	return &ContainerExecutor{
 		docker:   dm,
+		execAPI:  execAPI,
 		repoPath: repoPath,
 		emit:     emit,
 		running:  make(map[string]*runningContainer),
 	}
 }
 
-// Start creates the worktree, spawns the hardened container (bind-mounting
-// the worktree), starts the log-stream and filesystem-watcher goroutines,
-// and emits session.started with the real worktree_path. Everything
-// downstream — terminal.output from the log stream, file.changed from the
-// watcher — flows through the same emit hook simulator.go already uses, so
-// wsserver and the frontend need zero changes.
-func (e *ContainerExecutor) Start(sessionID string, opts SessionStartOpts) error {
+// Start creates the worktree, spawns the hardened persistent container
+// (bind-mounting the worktree), mints a per-session execapi bearer token,
+// launches the real swarm engine subprocess against that worktree, and
+// starts the filesystem-watcher and trace-tailer goroutines. Everything
+// downstream — terminal.output and tool.call/tool.result from execapi,
+// file.changed from the watcher, agent/tool events from the trace tailer —
+// flows through the same emit hook simulator.go already uses, so wsserver
+// and the frontend need zero changes.
+//
+// tangentDir is sess.TangentDir (sessions/<id>/.tangent/) — SessionStartOpts
+// only carries user-facing intent (goal/topology/mode), so this is passed
+// separately by Manager.StartSession, which already computes it.
+func (e *ContainerExecutor) Start(sessionID, tangentDir string, opts SessionStartOpts) error {
 	worktreePath, _, err := worktree.CreateWorktree(e.repoPath, sessionID)
 	if err != nil {
 		return fmt.Errorf("create worktree: %w", err)
@@ -70,19 +81,33 @@ func (e *ContainerExecutor) Start(sessionID string, opts SessionStartOpts) error
 
 	containerID, err := e.docker.SpawnContainer(ctx, docker.ContainerSpawnOpts{
 		Image:        defaultContainerImage,
-		Cmd:          defaultContainerCmd,
+		Cmd:          persistentContainerCmd,
 		WorktreePath: worktreePath,
 		MountTarget:  defaultContainerMountTarget,
+		Labels:       map[string]string{"tangent.session_id": sessionID},
 	})
 	if err != nil {
 		cancel()
 		return fmt.Errorf("spawn container: %w", err)
 	}
 
+	token, err := execapi.GenerateToken()
+	if err != nil {
+		cancel()
+		_ = e.docker.StopAndRemove(context.Background(), containerID)
+		return fmt.Errorf("generate daemon token: %w", err)
+	}
+
 	rc := &runningContainer{containerID: containerID, worktreePath: worktreePath, cancel: cancel}
 	e.mu.Lock()
 	e.running[sessionID] = rc
 	e.mu.Unlock()
+
+	e.execAPI.Register(sessionID, execapi.SessionInfo{
+		ContainerID:  containerID,
+		WorktreePath: worktreePath,
+		Token:        token,
+	})
 
 	// session.started carries the real worktree_path — this is what
 	// Manager.emitToSession uses to populate Session.worktreePath, which
@@ -93,44 +118,32 @@ func (e *ContainerExecutor) Start(sessionID string, opts SessionStartOpts) error
 		WorktreePath: worktreePath,
 	})
 
-	go e.streamLogs(ctx, sessionID, rc)
+	// The frontend's topology dropdown sends a bare key ("coding_swarm")
+	// matching the examples/ directory name, not a file path — every
+	// example topology follows this same layout.
+	topologyPath := filepath.ToSlash(filepath.Join("examples", opts.Topology, "topology.yaml"))
+	// A dedicated subdirectory, not the existing .tangent/trace.jsonl (that
+	// one is the Go daemon's own WS-envelope log, a completely different
+	// file from the swarm engine's internal span trace tailed here).
+	traceDir := filepath.Join(tangentDir, "traces")
+
+	swarmCmd, err := LaunchSwarmProcess(sessionID, opts.Goal, topologyPath, e.repoPath, worktreePath, traceDir, e.execAPI.BaseURL(), token)
+	if err != nil {
+		e.mu.Lock()
+		delete(e.running, sessionID)
+		e.mu.Unlock()
+		e.execAPI.Unregister(sessionID)
+		cancel()
+		_ = e.docker.StopAndRemove(context.Background(), containerID)
+		return fmt.Errorf("launch swarm process: %w", err)
+	}
+	rc.swarmCmd = swarmCmd
+
 	go e.watchWorktree(ctx, sessionID, worktreePath)
+	go e.tailTrace(ctx, sessionID, traceDir)
+	go e.waitSwarmProcess(sessionID, rc)
 
 	return nil
-}
-
-func (e *ContainerExecutor) streamLogs(ctx context.Context, sessionID string, rc *runningContainer) {
-	streamErr := e.docker.StreamLogs(ctx, rc.containerID, func(stream, line string) {
-		e.emit(sessionID, string(EventTerminalOutput), TerminalOutput{
-			ContainerID: rc.containerID,
-			Stream:      stream,
-			Data:        line + "\n",
-		})
-	})
-
-	if ctx.Err() != nil {
-		// Stop() cancelled us; Stop owns the container's final status.
-		return
-	}
-
-	if streamErr != nil {
-		e.emit(sessionID, string(EventError), EngineError{
-			Message: fmt.Sprintf("log stream ended: %v", streamErr),
-			Fatal:   false,
-		})
-	}
-
-	// The container's main process exited on its own. Leave it tracked
-	// (and leave the container un-removed) so a later, explicit Stop can
-	// still remove it — natural completion isn't cleanup.
-	e.mu.Lock()
-	rc.finished = true
-	e.mu.Unlock()
-
-	e.emit(sessionID, string(EventSessionEnded), SessionEnded{
-		Status:  "success",
-		Summary: "Container run finished.",
-	})
 }
 
 func (e *ContainerExecutor) watchWorktree(ctx context.Context, sessionID, worktreePath string) {
@@ -152,34 +165,84 @@ func (e *ContainerExecutor) watchWorktree(ctx context.Context, sessionID, worktr
 	}
 }
 
-// Stop stops and removes the container but leaves the worktree on disk — a
-// session stop isn't a delete; the human should still be able to inspect
-// what the agent produced. Safe to call after the container has already
-// exited on its own (e.g. the user clicks Stop after watching "agent
-// finished" scroll by): it still performs the actual Docker removal, but
-// won't emit a second, contradictory session.ended.
-func (e *ContainerExecutor) Stop(sessionID string) error {
+// tailTrace watches the swarm engine's own trace output and translates
+// each finished span into the closest matching contract event(s) — see
+// tracemap.go for the mapping and its documented limitations.
+func (e *ContainerExecutor) tailTrace(ctx context.Context, sessionID, traceDir string) {
+	err := watcher.TailTraceFile(ctx, traceDir, func(line string) {
+		mapTraceLine(func(eventType string, payload interface{}) {
+			e.emit(sessionID, eventType, payload)
+		}, line)
+	})
+	if err != nil && ctx.Err() == nil {
+		e.emit(sessionID, string(EventError), EngineError{
+			Message: fmt.Sprintf("trace tailer ended: %v", err),
+			Fatal:   false,
+		})
+	}
+}
+
+// waitSwarmProcess is the "swarm subprocess crashes or finishes on its
+// own" cleanup path — mirrors Stop's, arbitrated by claim() so whichever
+// of the two happens first (a manual Stop, or the process just ending) is
+// the only one that actually tears things down.
+func (e *ContainerExecutor) waitSwarmProcess(sessionID string, rc *runningContainer) {
+	waitErr := rc.swarmCmd.Wait()
+
+	claimed, ok := e.claim(sessionID)
+	if !ok {
+		return // Stop() already claimed cleanup
+	}
+
+	status, summary := "success", "Swarm run finished."
+	if waitErr != nil {
+		status, summary = "failed", fmt.Sprintf("Swarm process exited with error: %v", waitErr)
+	}
+	e.finish(sessionID, claimed, status, summary)
+}
+
+// claim atomically removes sessionID from the running set and returns
+// whether this caller was the one to do so — the single arbitration point
+// between an explicit Stop() and the swarm process ending on its own, so
+// exactly one of them performs cleanup and emits exactly one
+// session.ended.
+func (e *ContainerExecutor) claim(sessionID string) (*runningContainer, bool) {
 	e.mu.Lock()
+	defer e.mu.Unlock()
 	rc, ok := e.running[sessionID]
-	var alreadyFinished bool
 	if ok {
-		alreadyFinished = rc.finished
 		delete(e.running, sessionID)
 	}
-	e.mu.Unlock()
+	return rc, ok
+}
 
+// finish is the actual teardown: cancel the watcher/tracer goroutines, kill
+// the swarm subprocess if it's still alive, unregister from execapi, and
+// stop+remove the container. Unlike Step 4's one-shot containers (whose
+// exited-but-not-removed state was a deliberate "let the human inspect it"
+// choice), a persistent container's own process (tail -f /dev/null) never
+// exits on its own — leaving it running after the swarm process is done
+// would be a genuine orphan, not a useful inspectable artifact, so cleanup
+// always removes it. The worktree is untouched either way.
+func (e *ContainerExecutor) finish(sessionID string, rc *runningContainer, status, summary string) error {
+	rc.cancel()
+	if rc.swarmCmd != nil && rc.swarmCmd.Process != nil {
+		_ = rc.swarmCmd.Process.Kill() // no-op if it already exited
+	}
+	e.execAPI.Unregister(sessionID)
+	err := e.docker.StopAndRemove(context.Background(), rc.containerID)
+	e.emit(sessionID, string(EventSessionEnded), SessionEnded{Status: status, Summary: summary})
+	return err
+}
+
+// Stop ends a running session on demand: kills the swarm subprocess (if
+// still running) and removes the container, but leaves the worktree on
+// disk — a session stop isn't a delete; the human should still be able to
+// inspect what the agent produced.
+func (e *ContainerExecutor) Stop(sessionID string) error {
+	rc, ok := e.claim(sessionID)
 	if !ok {
 		return fmt.Errorf("no container tracked for session %q", sessionID)
 	}
-
-	rc.cancel() // no-op if the process already exited on its own
-	err := e.docker.StopAndRemove(context.Background(), rc.containerID)
-
-	if !alreadyFinished {
-		e.emit(sessionID, string(EventSessionEnded), SessionEnded{
-			Status:  "cancelled",
-			Summary: "Session stopped.",
-		})
-	}
-	return err
+	return e.finish(sessionID, rc, "cancelled", "Session stopped.")
 }

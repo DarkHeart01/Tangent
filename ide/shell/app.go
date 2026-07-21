@@ -59,6 +59,12 @@ func (s *SessionAPI) startup(ctx context.Context) {
 }
 
 func (s *SessionAPI) shutdown(ctx context.Context) {
+	// Stop every running container-mode session first (kills swarm
+	// subprocesses, removes containers) so a graceful app close never
+	// leaves one orphaned — see session.Manager.Shutdown.
+	if s.manager != nil {
+		s.manager.Shutdown()
+	}
 	if s.ws != nil {
 		s.ws.Stop()
 	}

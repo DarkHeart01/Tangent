@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
@@ -13,6 +14,19 @@ log = get_logger("tools.filesystem")
 
 _CWD = Path.cwd()
 _BUILT = _CWD / "built"
+
+# Set by the Go daemon (ide/shell) when this process was launched for a
+# container-mode IDE session — see internal/session/pyengine.go. Absent for
+# a standalone `swarm run` from a terminal, which must keep working exactly
+# as before: only read/write route through the daemon (below); the other
+# operations already work correctly against the same worktree either way
+# (this process has direct host filesystem access to it — the daemon route
+# exists for Dashboard tool-call visibility, not sandboxing, unlike
+# shell_exec), so they're left on the local path unconditionally rather
+# than inventing daemon endpoints the plan didn't ask for.
+_DAEMON_URL = os.environ.get("TANGENT_DAEMON_URL")
+_DAEMON_TOKEN = os.environ.get("TANGENT_DAEMON_TOKEN")
+_SESSION_ID = os.environ.get("TANGENT_SESSION_ID")
 
 # Paths that are always read-only project internals — never rerouted to built/
 _INTERNAL_PREFIXES = ("traces", "memory_store", "configs", "agents", "tools",
@@ -103,12 +117,16 @@ class FilesystemHandler(ToolHandler):
             path = _safe_path(raw_path)
 
         if op == "read":
+            if _DAEMON_URL:
+                return await self._read_via_daemon(path)
             if not path.exists():
                 return {"error": f"File not found: {path}"}
             return {"content": path.read_text(encoding="utf-8", errors="replace"),
                     "path": str(path.relative_to(_CWD))}
 
         elif op == "write":
+            if _DAEMON_URL:
+                return await self._write_via_daemon(path, inputs.get("content", ""))
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(inputs.get("content", ""), encoding="utf-8")
             await _mirror_write(path)
@@ -195,6 +213,53 @@ class FilesystemHandler(ToolHandler):
             return {"exists": path.exists(), "is_file": path.is_file(), "is_dir": path.is_dir()}
 
         return {"error": f"Unknown operation: {op}"}
+
+    async def _read_via_daemon(self, path: Path) -> dict[str, Any]:
+        """Reads via the Go daemon's execapi instead of directly off disk.
+        Functionally equivalent either way — this process already has
+        direct host access to the same bind-mounted worktree the daemon
+        operates on — done for Dashboard tool-call visibility. path is
+        already resolved+jailed by _safe_path above; the daemon applies its
+        own independent path-jail check on top (defense in depth, not a
+        replacement for the check already done here).
+        """
+        import httpx
+
+        rel = str(path.relative_to(_CWD)).replace("\\", "/")
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"{_DAEMON_URL}/sessions/{_SESSION_ID}/fs",
+                    params={"path": rel},
+                    headers={"Authorization": f"Bearer {_DAEMON_TOKEN}"},
+                    timeout=15,
+                )
+            if resp.status_code == 404:
+                return {"error": f"File not found: {path}"}
+            resp.raise_for_status()
+            return {"content": resp.content.decode("utf-8", errors="replace"), "path": rel}
+        except httpx.HTTPError as exc:
+            return {"error": f"daemon read failed: {exc}"}
+
+    async def _write_via_daemon(self, path: Path, content: str) -> dict[str, Any]:
+        import httpx
+
+        rel = str(path.relative_to(_CWD)).replace("\\", "/")
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.put(
+                    f"{_DAEMON_URL}/sessions/{_SESSION_ID}/fs",
+                    params={"path": rel},
+                    content=content.encode("utf-8"),
+                    headers={"Authorization": f"Bearer {_DAEMON_TOKEN}"},
+                    timeout=15,
+                )
+            resp.raise_for_status()
+            data = resp.json()
+            await _mirror_write(path)  # same artifact-sink hook the local write path calls
+            return {"written": rel, "bytes": data.get("bytes_written", len(content))}
+        except httpx.HTTPError as exc:
+            return {"error": f"daemon write failed: {exc}"}
 
     async def self_test(self) -> bool:
         import tempfile, os

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"shell/internal/docker"
+	"shell/internal/execapi"
 )
 
 // gateDecision is delivered from ResolveGate (an RPC-handler goroutine) to
@@ -233,6 +235,7 @@ type Manager struct {
 
 	execMu   sync.Mutex
 	docker   *docker.DockerManager
+	execAPI  *execapi.Server
 	executor *ContainerExecutor
 }
 
@@ -244,10 +247,14 @@ func NewManager(sessionsRoot, repoPath string) *Manager {
 	}
 }
 
-// containerExecutor lazily creates the Docker client and ContainerExecutor
-// on first use, so the app (and simulated-mode sessions) work fine even if
-// Docker isn't installed or running — simulator.go remains a dev-mode
-// fallback that has no Docker dependency at all.
+// containerExecutor lazily creates the Docker client, the execapi server,
+// and ContainerExecutor on first use, so the app (and simulated-mode
+// sessions) work fine even if Docker isn't installed or running —
+// simulator.go remains a dev-mode fallback that has no Docker dependency
+// at all. Also runs the orphaned-container reconciliation pass exactly
+// once here, before anything new can start, so a container left running
+// by a prior crashed daemon process gets cleaned up rather than
+// accumulating.
 func (m *Manager) containerExecutor() (*ContainerExecutor, error) {
 	m.execMu.Lock()
 	defer m.execMu.Unlock()
@@ -258,9 +265,50 @@ func (m *Manager) containerExecutor() (*ContainerExecutor, error) {
 	if err != nil {
 		return nil, fmt.Errorf("docker unavailable: %w", err)
 	}
+	if removed, cleanupErr := dm.CleanupOrphaned(context.Background()); cleanupErr == nil && removed > 0 {
+		log.Printf("session: removed %d orphaned container(s) from a previous run", removed)
+	}
+
+	execServer := execapi.New(dm, m.emitToSession)
+	if _, err := execServer.Start(); err != nil {
+		return nil, fmt.Errorf("start execapi server: %w", err)
+	}
+
 	m.docker = dm
-	m.executor = NewContainerExecutor(dm, m.repoPath, m.emitToSession)
+	m.execAPI = execServer
+	m.executor = NewContainerExecutor(dm, execServer, m.repoPath, m.emitToSession)
 	return m.executor, nil
+}
+
+// Shutdown stops every currently-running container-mode session (killing
+// its swarm subprocess and removing its container) — called from the
+// Wails OnShutdown hook so a graceful app close doesn't orphan anything.
+// A hard kill of the daemon process bypasses this entirely; CleanupOrphaned
+// is the safety net for that case, run on the next startup.
+func (m *Manager) Shutdown() {
+	m.execMu.Lock()
+	executor := m.executor
+	execServer := m.execAPI
+	m.execMu.Unlock()
+	if executor == nil {
+		return
+	}
+
+	m.mu.RLock()
+	var containerSessions []string
+	for id, sess := range m.sessions {
+		if sess.Mode == "container" {
+			containerSessions = append(containerSessions, id)
+		}
+	}
+	m.mu.RUnlock()
+
+	for _, id := range containerSessions {
+		_ = executor.Stop(id)
+	}
+	if execServer != nil {
+		_ = execServer.Stop()
+	}
 }
 
 // emitToSession is the hook ContainerExecutor uses to publish events —
@@ -371,7 +419,7 @@ func (m *Manager) StartSession(opts SessionStartOpts) (*Session, error) {
 			cancel()
 			return nil, err
 		}
-		if err := executor.Start(id, opts); err != nil {
+		if err := executor.Start(id, sess.TangentDir, opts); err != nil {
 			m.removeSession(id)
 			cancel()
 			return nil, fmt.Errorf("start container executor: %w", err)

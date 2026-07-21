@@ -14,6 +14,7 @@ build/
 htmlcov/
 traces/
 memory_store/
+!tools/memory_store/
 *.jsonl
 *.log
 chroma_db/
