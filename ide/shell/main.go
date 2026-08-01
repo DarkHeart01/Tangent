@@ -1,3 +1,7 @@
+// Can crash with "fatal error: traceback: unexpected SPWRITE function
+// sigtramp" — a Go-runtime-level fault inside a goroutine Wails spawns per
+// WebView2 resource request, unrelated to this file. Unresolved; see the
+// "Known crash" section in README.md before attempting another fix.
 package main
 
 import (

@@ -59,8 +59,23 @@ From `ide/shell`:
 
 ```powershell
 # Start the Wails desktop app with frontend hot reload
+$env:GOARCH = "amd64"
 wails dev
 ```
+
+`GOARCH=amd64` is required on this machine's toolchain: the installed Go defaults to `windows/386`, which is far more prone to the crash below, though not immune to it.
+
+### Known crash: `fatal error: traceback: unexpected SPWRITE function sigtramp`
+
+The app can crash — usually shortly after the WebView2 environment initializes and the frontend starts loading its ~100+ asset chunks — with a Go runtime-level (not application) fatal error originating in a goroutine spawned by Wails' `assetserver.(*AssetServer).ServeWebViewRequest`. Every WebView2 resource request spawns a bare `go` goroutine directly from the WebView2 COM callback thread (Wails v2.13.0 has no worker-pool path wired up — `dispatchWorkers` is never set), and under load one of those goroutines can need a stack grow/copy at the exact moment its OS thread is mid-transition through the COM callback trampoline, which trips Go's stack-safety check and aborts the process.
+
+Ruled out so far (none of these fixed it, each confirmed active at the time of a repeat crash):
+- `GOARCH=amd64` vs `windows/386` — changes crash frequency, not whether it happens.
+- `GODEBUG=asyncpreemptoff=1` — irrelevant; on Windows this crash path isn't scheduler-preemption-related (Windows async-preempt uses `SuspendThread`, not signals).
+- `-tags native_webview2loader` (legacy loader) vs the new Go-native loader — both share the same request-callback code path.
+- Wails v2.13.0 is the latest available v2 release; there's no newer patch to upgrade to.
+
+Likely cause: a version skew between this Go toolchain and what Wails v2.13.0 was built/tested against. Not yet fixed — see project memory for current status before assuming otherwise.
 
 `wails dev` opens the native Tangent IDE window. The `http://localhost:34115` URL printed by Wails is an optional browser preview; it does not provide the native Go bindings, PTY terminal, or Swarm session controls.
 
