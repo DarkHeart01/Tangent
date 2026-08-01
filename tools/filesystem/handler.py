@@ -81,14 +81,27 @@ def _safe_path(rel: str) -> Path:
 
 def _build_path(rel: str) -> Path:
     """For write/append operations: redirect bare paths into built/ unless
-    they already target an internal swarm directory or built/ itself."""
+    they already target built/ itself — and DENY writes into any other
+    internal swarm directory (agents/, tools/, core/, etc.) outright.
+    Those directories are the swarm engine's own source, present in every
+    container-mode worktree (a full clone of this repo) — an unredirected
+    write there would silently modify the running swarm's own code
+    instead of landing in the generated-output area this tool is for.
+    Confirmed no agent tool relies on writing to one of these via this
+    handler (all "prefix filesystem writes" instructions in agent prompts
+    are about output_dir, i.e. built/, not these) before flipping this
+    from silently-allowed to denied."""
     parts = Path(rel).parts
     first = parts[0] if parts else ""
-    if first in _INTERNAL_PREFIXES or rel.startswith("/"):
+    if rel.startswith("/"):
         return _safe_path(rel)
-    # Already inside built/
     if first == "built":
         return _safe_path(rel)
+    if first in _INTERNAL_PREFIXES:
+        raise SafetyError(
+            f"Path {rel!r} targets an internal swarm directory ({first}/) — "
+            "writes there are denied; use a path under built/ instead."
+        )
     # Redirect to built/
     redirected = str(Path("built") / rel)
     return _safe_path(redirected)

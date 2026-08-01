@@ -1,0 +1,35 @@
+name: _demo_full
+description: |
+  Scripted demo topology exercising, in one real run: session start,
+  container spawn, terminal streaming, a phase gate, a tool-call gate, a
+  question gate, a real file write (visible in the fixed built/ file-tree
+  default view), and a real CDDContract artifact (visible in the Dev
+  Walkthrough panel via contract.emitted -> GetArtifact). Reuses
+  _gate_test_lifecycle's lifecycle YAML (kept standing fixture) unchanged.
+  Not for production use.
+
+orchestrator: _gate_test_agent
+
+agents:
+  - role: _gate_test_agent
+    count: 1
+    tools_override: [filesystem, self_reflect, kubernetes_apply, human_input, artifact_write]
+
+coordination:
+  strategy: lifecycle
+  lifecycle: _gate_test_lifecycle
+  max_subswarm_size: 1
+  consensus_protocol: majority
+  debate_max_rounds: 1
+  approval_gates: true
+
+budget:
+  max_cost_usd: 0.35
+  warn_at_fraction: 0.8
+
+safety:
+  mode: interactive
+  tool_allowlist: [filesystem, self_reflect, kubernetes_apply, human_input, artifact_write]
+  require_confirmation_for: [mutates-external]
+
+memory_backend: local

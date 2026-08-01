@@ -48,3 +48,5 @@ devforge-frontend/backend/.env
 /test_store_smoke4/
 /swarm_output/
 /*.mmd
+
+**/.tangent-worktrees/

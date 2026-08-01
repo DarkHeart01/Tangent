@@ -117,7 +117,14 @@ function FileTreeNode({ node, depth, selectedPath, onSelect, onContextMenu }: { 
 type TreeExpandProps = { onExpandDir: (path: string) => void; loadedDirs: Set<string>; onSelectDir: (path: string) => void };
 
 function FileTreeNodePolished({ node, depth, selectedPath, onSelect, onContextMenu, gitFiles, onExpandDir, loadedDirs, onSelectDir }: { node: FileNode; depth: number; selectedPath: string | null; onSelect: (path: string, preview: boolean) => void; onContextMenu: (event: React.MouseEvent, node: FileNode) => void; gitFiles: Record<string, string> } & TreeExpandProps) {
-  const [open, setOpen] = useState(false);
+  // Container-mode sessions run in a full monorepo worktree, so the tree
+  // root is mostly the swarm engine's own source (agents/, tools/,
+  // configs/, etc) — everything the filesystem tool actually writes for
+  // the user gets redirected into built/ (tools/filesystem/handler.py).
+  // Auto-expand just that one root-level folder so a written file is
+  // visible without the user needing to know the redirect exists at all;
+  // everything else still defaults collapsed as before.
+  const [open, setOpen] = useState(depth === 0 && node.is_dir && node.name === "built");
   const { workspace, loadFolderChildren } = useWorkspace();
   const gitStatus = gitFiles[node.path];
   const folderChanged = node.is_dir && Object.entries(gitFiles).some(([path, status]) => status !== "I" && path.startsWith(`${node.path}/`));
@@ -154,7 +161,13 @@ function FileTreeNodePolished({ node, depth, selectedPath, onSelect, onContextMe
 
 function Tree({ tree, selectedPath, onSelect, onContextMenu, gitFiles, onExpandDir, loadedDirs, onSelectDir, emptyLabel }: { tree: FileNode[]; selectedPath: string | null; onSelect: (path: string, preview: boolean) => void; onContextMenu: (event: React.MouseEvent, node: FileNode) => void; gitFiles: Record<string, string>; emptyLabel?: string } & TreeExpandProps) {
   if (!tree.length) return <div className="file-tree__empty">{emptyLabel ?? "Start a session to browse its worktree."}</div>;
-  return <div className="file-tree">{tree.map((node) => <FileTreeNodePolished key={node.path} node={node} depth={0} selectedPath={selectedPath} onSelect={onSelect} onContextMenu={onContextMenu} gitFiles={gitFiles} onExpandDir={onExpandDir} loadedDirs={loadedDirs} onSelectDir={onSelectDir} />)}</div>;
+  // Promote built/ to the top of the root listing — it's auto-expanded
+  // (see FileTreeNodePolished) and is what the user actually cares about;
+  // everything else keeps its existing order.
+  const ordered = tree.some((n) => n.is_dir && n.name === "built")
+    ? [...tree].sort((a, b) => Number(b.is_dir && b.name === "built") - Number(a.is_dir && a.name === "built"))
+    : tree;
+  return <div className="file-tree">{ordered.map((node) => <FileTreeNodePolished key={node.path} node={node} depth={0} selectedPath={selectedPath} onSelect={onSelect} onContextMenu={onContextMenu} gitFiles={gitFiles} onExpandDir={onExpandDir} loadedDirs={loadedDirs} onSelectDir={onSelectDir} />)}</div>;
 }
 
 export default function Editor({ treeOnly = false }: { treeOnly?: boolean } = {}) {

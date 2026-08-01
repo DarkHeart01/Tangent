@@ -38,7 +38,11 @@ export const startSession = (goal: string, topology: string, mode: SessionMode):
 
 export const stopSession = (sessionId: string): Promise<void> => SessionAPI.StopSession(sessionId);
 
-export const resolveGate = (gateId: string, decision: "approve" | "reject", note: string): Promise<void> =>
+// decision is "approve"/"reject" for gate_kind "phase"/"tool_call" (HumanGateBanner),
+// or the raw free-text answer for gate_kind "question" (Dashboard's chat) — both
+// parent branches of the frontend merge had independently widened this to string
+// and hit the same TS2345 problem when it got reverted; keep it as string.
+export const resolveGate = (gateId: string, decision: string, note: string): Promise<void> =>
   SessionAPI.ResolveGate(gateId, decision, note);
 
 export const searchWorkspace = (root: string, query: string): Promise<SearchMatch[]> => SessionAPI.SearchWorkspace(root, query);
@@ -63,6 +67,15 @@ export const getCost = (sessionId: string): Promise<CostReport> => SessionAPI.Ge
 
 export const getContracts = (sessionId: string): Promise<ContractEntry[]> =>
   SessionAPI.GetContracts(sessionId);
+
+// Real CDDContract data (full_document + openapi_yaml/asyncapi_yaml/
+// ci_pipeline_yaml), fetched via a short-lived `swarm artifact show --json`
+// subprocess (cli/main.py's existing artifact_show command) — not a new
+// HTTP route, and only called after a contract.emitted event confirms the
+// artifact write already landed in the registry.
+export type ArtifactEntry = main.ArtifactEntry;
+export const getArtifact = (sessionId: string, artifactId: string): Promise<ArtifactEntry> =>
+  SessionAPI.GetArtifact(sessionId, artifactId);
 
 export const selectWorkspace = (): Promise<WorkspaceInfo> => SessionAPI.SelectWorkspace();
 export const validateWorkspacePath = (path: string): Promise<WorkspaceInfo> => SessionAPI.ValidateWorkspacePath(path);

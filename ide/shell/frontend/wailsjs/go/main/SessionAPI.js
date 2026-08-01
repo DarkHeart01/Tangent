@@ -18,6 +18,10 @@ export function DeleteWorkspacePath(arg1, arg2) {
   return window['go']['main']['SessionAPI']['DeleteWorkspacePath'](arg1, arg2);
 }
 
+export function GetArtifact(arg1, arg2) {
+  return window['go']['main']['SessionAPI']['GetArtifact'](arg1, arg2);
+}
+
 export function GetContracts(arg1) {
   return window['go']['main']['SessionAPI']['GetContracts'](arg1);
 }

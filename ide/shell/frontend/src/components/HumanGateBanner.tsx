@@ -4,18 +4,6 @@ import { onEnvelopeType } from "../lib/wsClient";
 import type { HumanGatePending } from "../lib/contract";
 import * as wailsClient from "../lib/wailsClient";
 
-// A "question" gate carries its choices in proposed_action as "Options: a, b, c"
-// (see execapi/gate.go). Pull them back out so we can render real buttons.
-function parseOptions(proposedAction: string): string[] {
-  const prefix = "Options: ";
-  if (!proposedAction.startsWith(prefix)) return [];
-  return proposedAction
-    .slice(prefix.length)
-    .split(",")
-    .map((option) => option.trim())
-    .filter(Boolean);
-}
-
 export default function HumanGateBanner() {
   const { activeSessionId, activeWsClient } = useSession();
   const [pending, setPending] = useState<HumanGatePending | null>(null);
@@ -23,7 +11,6 @@ export default function HumanGateBanner() {
 
   useEffect(() => {
     setPending(null);
-    setAnswer("");
     if (!activeWsClient) return;
     const unsubPending = onEnvelopeType(activeWsClient, "human_gate.pending", (payload) => {
       setPending(payload);
@@ -39,12 +26,13 @@ export default function HumanGateBanner() {
 
   if (!pending) return null;
 
+  const isQuestion = pending.gate_kind === "question";
+
   const decide = async (decision: "approve" | "reject") => {
     setResolving(true);
     try {
       await wailsClient.resolveGate(pending.gate_id, decision, "");
       setPending(null);
-      setAnswer("");
     } finally {
       setResolving(false);
     }
@@ -53,20 +41,34 @@ export default function HumanGateBanner() {
   return (
     <div className={`human-gate-banner human-gate-banner--${pending.gate_kind}`}>
       <div className="human-gate-banner__body">
-        <div className="human-gate-banner__title">Human approval required — {pending.phase}</div>
-        <div className="human-gate-banner__reason">{pending.reason}</div>
-        <div className="human-gate-banner__action">
-          Proposed action: <code>{pending.proposed_action}</code>
+        <div className="human-gate-banner__title">
+          {isQuestion ? "The swarm is asking you something" : `Human approval required — ${pending.phase}`}
         </div>
+        <div className="human-gate-banner__reason">{pending.reason}</div>
+        {!isQuestion && (
+          <div className="human-gate-banner__action">
+            Proposed action: <code>{pending.proposed_action}</code>
+          </div>
+        )}
       </div>
-      <div className="human-gate-banner__buttons">
-        <button className="approve" disabled={resolving} onClick={() => decide("approve")}>
-          Approve
-        </button>
-        <button className="reject" disabled={resolving} onClick={() => decide("reject")}>
-          Reject
-        </button>
-      </div>
+      {isQuestion ? (
+        // "question" gates are answered with real free text, which needs a
+        // real input — that surface is Dashboard's chat (it already does
+        // gate_kind === "question" + resolveGate(gate_id, text, "") against
+        // the real contract). This banner stays passive for this kind so
+        // there's exactly one place that can resolve a question gate, not
+        // two competing ones.
+        <div className="human-gate-banner__hint">A question is waiting — see chat</div>
+      ) : (
+        <div className="human-gate-banner__buttons">
+          <button className="approve" disabled={resolving} onClick={() => decide("approve")}>
+            Approve
+          </button>
+          <button className="reject" disabled={resolving} onClick={() => decide("reject")}>
+            Reject
+          </button>
+        </div>
+      )}
     </div>
   );
 }

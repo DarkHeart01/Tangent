@@ -11,6 +11,8 @@ export function CreateWorkspaceFolder(arg1:string,arg2:string):Promise<void>;
 
 export function DeleteWorkspacePath(arg1:string,arg2:string):Promise<void>;
 
+export function GetArtifact(arg1:string,arg2:string):Promise<main.ArtifactEntry>;
+
 export function GetContracts(arg1:string):Promise<Array<session.ContractEntry>>;
 
 export function GetCost(arg1:string):Promise<session.CostReport>;

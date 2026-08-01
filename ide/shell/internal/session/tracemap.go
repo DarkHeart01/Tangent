@@ -96,6 +96,25 @@ func mapTraceLine(emit func(eventType string, payload interface{}), line string)
 		}
 		emit("tool.result", ToolResult{CallID: callID, Status: resultStatus, Summary: summary})
 
+		// artifact_write succeeding means a real artifact (e.g. a CDDContract)
+		// landed in the ChromaDB registry — tools/base.py's ToolHandler.run
+		// now records the real artifact_id/artifact_type in the span
+		// attributes (previously only the result's *key names* were kept,
+		// so this couldn't fire for a real run at all before). The
+		// Walkthrough panel queries the artifact by this id only after
+		// seeing this event, per the "never hold a concurrent Chroma
+		// client" rule — this is the confirmation the write landed.
+		if toolName == "artifact_write" && resultStatus == "ok" {
+			if artifactID, ok := span.Attributes["artifact_id"].(string); ok && artifactID != "" {
+				artifactType, _ := span.Attributes["artifact_type"].(string)
+				emit("contract.emitted", ContractEmitted{
+					ContractID: artifactID,
+					Phase:      taskID,
+					Ref:        artifactType,
+				})
+			}
+		}
+
 	case "agent":
 		instanceID := agentID
 		if instanceID == "" {

@@ -104,6 +104,13 @@ class ToolHandler(ABC):
                     self._run(inputs), timeout=self.spec.timeout
                 )
                 span.set(output_keys=list(result.keys()))
+                # artifact_write's result carries the newly-created artifact's
+                # real id — only the key names were being recorded above, so
+                # the Go daemon's trace tailer (tracemap.go) had no artifact_id
+                # to map a real contract.emitted event to. Generic/harmless
+                # for every other tool, since they never have this key.
+                if "artifact_id" in result:
+                    span.set(artifact_id=result.get("artifact_id"), artifact_type=result.get("artifact_type"))
                 log.debug("tool_ok", tool=self.spec.name, agent_id=agent_id)
                 return result
             except asyncio.TimeoutError:

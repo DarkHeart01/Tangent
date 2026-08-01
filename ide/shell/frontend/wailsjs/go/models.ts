@@ -1,5 +1,55 @@
 export namespace main {
 	
+	export class ArtifactEntry {
+	    id: string;
+	    artifact_type: string;
+	    version: number;
+	    stage_id?: string;
+	    author_agent_id?: string;
+	    project_id?: string;
+	    created_at: string;
+	    status: string;
+	    lineage?: string[];
+	    project_name?: string;
+	    contract_version?: string;
+	    contract_status?: string;
+	    consumer_service?: string;
+	    provider_service?: string;
+	    primary_protocol?: string;
+	    async_broker?: string;
+	    full_document?: string;
+	    openapi_yaml?: string;
+	    asyncapi_yaml?: string;
+	    ci_pipeline_yaml?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ArtifactEntry(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.artifact_type = source["artifact_type"];
+	        this.version = source["version"];
+	        this.stage_id = source["stage_id"];
+	        this.author_agent_id = source["author_agent_id"];
+	        this.project_id = source["project_id"];
+	        this.created_at = source["created_at"];
+	        this.status = source["status"];
+	        this.lineage = source["lineage"];
+	        this.project_name = source["project_name"];
+	        this.contract_version = source["contract_version"];
+	        this.contract_status = source["contract_status"];
+	        this.consumer_service = source["consumer_service"];
+	        this.provider_service = source["provider_service"];
+	        this.primary_protocol = source["primary_protocol"];
+	        this.async_broker = source["async_broker"];
+	        this.full_document = source["full_document"];
+	        this.openapi_yaml = source["openapi_yaml"];
+	        this.asyncapi_yaml = source["asyncapi_yaml"];
+	        this.ci_pipeline_yaml = source["ci_pipeline_yaml"];
+	    }
+	}
 	export class GitBranch {
 	    name: string;
 	    current: boolean;
