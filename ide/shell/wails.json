@@ -4,7 +4,8 @@
   "outputfilename": "shell",
   "frontend:install": "npm install",
   "frontend:build": "npm run build",
-  "frontend:dev:watcher": "npm run build -- --watch --logLevel warn --minify false",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
   "author": {
     "name": "DarkHeart01",
     "email": "tiwarinishant04@gmail.com"
