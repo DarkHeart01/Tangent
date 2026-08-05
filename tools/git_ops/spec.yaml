@@ -1,6 +1,6 @@
 name: git_ops
-description: "Git operations: branch, commit, push, open PR. Write operations (push, PR) are mutates-external and require confirmation. Pushing to main requires prod-risk approval."
-version: "1.0.0"
+description: "Git operations: branch, commit, push, open PR, and create/list/remove worktrees. Write operations (push, PR, worktree_add, worktree_remove) are mutates-external and require confirmation. Pushing to main requires prod-risk approval. Worktrees created via worktree_add are nested under .agent-worktrees/ inside the agent's own assigned worktree, not arbitrary host paths."
+version: "1.1.0"
 side_effect_level: mutates-external
 permissions: [git_write]
 input_schema:
@@ -8,7 +8,7 @@ input_schema:
   properties:
     action:
       type: string
-      enum: [init, status, branch, checkout, add, commit, push, pull, log, diff, pr_create, create_tag]
+      enum: [init, status, branch, checkout, add, commit, push, pull, log, diff, pr_create, create_tag, worktree_add, worktree_list, worktree_remove]
     branch_name:
       type: string
     commit_message:
@@ -38,6 +38,12 @@ input_schema:
     commit_sha:
       type: string
       description: "Optional commit SHA to tag (defaults to HEAD)"
+    worktree_name:
+      type: string
+      description: "Single path-segment identifier for worktree_add/worktree_list/worktree_remove — resolved to .agent-worktrees/<worktree_name> inside the agent's own worktree. No slashes or '..'."
+    create_branch:
+      type: boolean
+      description: "worktree_add only. True (default) creates a fresh branch (branch_name, or agent-worktree/<worktree_name> if unset) for the new worktree. False attaches the worktree to an existing branch given in branch_name."
   required: [action]
   additionalProperties: false
 output_schema:
