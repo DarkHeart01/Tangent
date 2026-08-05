@@ -1,7 +1,6 @@
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
 import * as wailsClient from "./wailsClient";
 import { logInfo, reportError } from "./errorReporting";
-import FolderPicker from "../components/FolderPicker";
 
 export type LocalFile = { path: string; content: string; writable?: boolean; handle?: unknown; parentHandle?: unknown };
 export type LocalWorkspace = { name: string; rootPath: string; files: LocalFile[]; folders: string[]; folderHandles?: Record<string, unknown>; loadedFolders?: Set<string>; backendRoot?: boolean };
@@ -66,8 +65,6 @@ function chooseBrowserFiles(directory: boolean): Promise<File[]> {
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [workspace, setWorkspace] = useState<LocalWorkspace | null>(null);
   const [recentProjects, setRecentProjects] = useState<RecentProject[]>(readRecent);
-  const [folderPickerOpen, setFolderPickerOpen] = useState(false);
-  const [folderPickerInitialPath, setFolderPickerInitialPath] = useState("");
 
   const remember = useCallback((project: RecentProject) => {
     setRecentProjects((current) => {
@@ -78,17 +75,18 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const openFolder = useCallback(async () => {
-    // The Wails desktop app uses the in-app picker below instead of the
-    // native Windows folder dialog. That avoids the COM/WebView2 crash path
-    // while still producing the absolute path needed by the backend explorer
-    // and terminal.
     if (wailsClient.isWailsDesktop()) {
       try {
-        const home = await wailsClient.getUserHomePath();
-        setFolderPickerInitialPath(home);
-        setFolderPickerOpen(true);
+        logInfo("folder-open", "opening native folder dialog");
+        const info = await wailsClient.selectWorkspace();
+        if (!info.path) return; // user cancelled the dialog
+        logInfo("folder-open", `selected, setting workspace: ${info.path}`);
+        const next: LocalWorkspace = { name: info.name, rootPath: info.path, files: [], folders: [], backendRoot: true };
+        setWorkspace(next);
+        remember({ name: next.name, path: next.rootPath });
       } catch (error) {
-        window.alert(`Could not determine your home folder: ${String(error)}`);
+        reportError("folder-open", error);
+        window.alert(`Could not open folder: ${String(error)}`);
       }
       return;
     }
@@ -121,23 +119,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     remember({ name: next.name, path: next.rootPath });
   }, [remember]);
 
-  const selectNativeFolder = useCallback(async (path: string) => {
-    logInfo("folder-open", `validating path: ${path}`);
-    try {
-      const info = await wailsClient.validateWorkspacePath(path);
-      logInfo("folder-open", `validated, setting workspace: ${info.path}`);
-      const next: LocalWorkspace = { name: info.name, rootPath: info.path, files: [], folders: [], backendRoot: true };
-      setWorkspace(next);
-      remember({ name: next.name, path: next.rootPath });
-      setFolderPickerOpen(false);
-      logInfo("folder-open", "workspace state committed");
-    } catch (error) {
-      reportError("folder-open", error);
-      window.alert(`Could not open "${path}": ${String(error)}`);
-    }
-  }, [remember]);
-
-  const closeFolderPicker = useCallback(() => setFolderPickerOpen(false), []);
 
   // Fetches one directory's immediate children on demand (see listEntries
   // above for why this isn't done recursively up front) and merges them
@@ -172,7 +153,14 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       const [file] = await chooseBrowserFiles(false); if (!file) return;
       const next = { name: file.name, rootPath: file.name, files: [{ path: file.name, content: await file.text(), writable: false }], folders: [] }; setWorkspace(next); remember({ name: next.name, path: next.rootPath }); return;
     }
-    const [handle] = await picker({ multiple: false }); const file = await handle.getFile(); const next = { name: file.name, rootPath: file.name, files: [{ path: file.name, content: await file.text(), writable: typeof handle.createWritable === "function", handle }], folders: [] };
+    let handle;
+    try {
+      [handle] = await picker({ multiple: false });
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") return; // user cancelled the dialog
+      throw error;
+    }
+    const file = await handle.getFile(); const next = { name: file.name, rootPath: file.name, files: [{ path: file.name, content: await file.text(), writable: typeof handle.createWritable === "function", handle }], folders: [] };
     setWorkspace(next); remember({ name: next.name, path: next.rootPath });
   }, [remember]);
 
@@ -288,13 +276,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const value = useMemo(() => ({ workspace, recentProjects, openFolder, openFile, createFile, createFolder, renamePath, deletePath, openRecent, saveFile, closeWorkspace, loadFolderChildren }), [workspace, recentProjects, openFolder, openFile, createFile, createFolder, renamePath, deletePath, openRecent, saveFile, closeWorkspace, loadFolderChildren]);
   return <WorkspaceContext.Provider value={value}>
     {children}
-    {folderPickerOpen && folderPickerInitialPath && (
-      <FolderPicker
-        initialPath={folderPickerInitialPath}
-        onCancel={closeFolderPicker}
-        onSelect={(path) => void selectNativeFolder(path)}
-      />
-    )}
   </WorkspaceContext.Provider>;
 }
 

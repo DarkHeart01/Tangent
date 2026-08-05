@@ -3,6 +3,9 @@ build/bin/
 build/
 *.exe
 *.syso
+# Vendored ripgrep (MIT-licensed, from @vscode/ripgrep) backs the code search
+# feature and is intentionally committed - it's not build output.
+!bin/rg.exe
 
 # ── Node / frontend build artifacts ──
 node_modules/

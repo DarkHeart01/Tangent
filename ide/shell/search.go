@@ -1,17 +1,19 @@
 package main
 
 import (
-	"bytes"
-	"io/fs"
-	"os"
+	"bufio"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
 
-// Global codebase search — the backing for the Explorer's Search view. A
-// bounded, dependency-free content grep over the workspace: skips VCS/build/dep
-// directories, binary and oversized files, and caps total matches so a huge
-// repo can never hang the UI or flood the IPC bridge.
+// Global codebase search — the backing for the Explorer's Search view. Shells
+// out to the vendored ripgrep (see ripgrep.go) instead of hand-walking the
+// tree: gitignore-aware, skips binary files automatically, and is orders of
+// magnitude faster than a naive per-file substring scan on large repos.
 
 type SearchMatch struct {
 	Path    string `json:"path"`    // workspace-relative, forward-slash
@@ -21,16 +23,18 @@ type SearchMatch struct {
 }
 
 const (
-	maxSearchMatches  = 500
-	maxSearchFileSize = 2 << 20 // 2 MiB — skip anything larger
-	maxPreviewLen     = 240
+	maxSearchMatches     = 500
+	maxSearchFileSizeArg = "2M" // ripgrep --max-filesize value
+	maxPreviewLen        = 240
 )
 
-// Directories never worth searching. Any dotted dir is skipped too.
-var searchSkipDirs = map[string]bool{
-	"node_modules": true, "dist": true, "build": true, "out": true,
-	"venv": true, "__pycache__": true, "vendor": true, "target": true,
-	"bin": true, "obj": true, ".git": true, ".next": true, ".cache": true,
+// Directories skipped regardless of .gitignore - belt-and-suspenders on top
+// of ripgrep's own gitignore-awareness, for repos with a thin or missing
+// .gitignore.
+var searchSkipDirs = []string{
+	"node_modules", "dist", "build", "out",
+	"venv", "__pycache__", "vendor", "target",
+	"bin", "obj", ".git", ".next", ".cache",
 }
 
 func truncatePreview(line string) string {
@@ -40,6 +44,24 @@ func truncatePreview(line string) string {
 		return trimmed[:maxPreviewLen] + "…"
 	}
 	return trimmed
+}
+
+// Minimal subset of ripgrep's --json event schema - see
+// https://docs.rs/grep-printer/latest/grep_printer/struct.JSON.html
+type rgEvent struct {
+	Type string `json:"type"`
+	Data struct {
+		Path struct {
+			Text string `json:"text"`
+		} `json:"path"`
+		Lines struct {
+			Text string `json:"text"`
+		} `json:"lines"`
+		LineNumber int `json:"line_number"`
+		Submatches []struct {
+			Start int `json:"start"`
+		} `json:"submatches"`
+	} `json:"data"`
 }
 
 // SearchWorkspace scans root for a case-insensitive substring match of query
@@ -54,57 +76,74 @@ func (s *SessionAPI) SearchWorkspace(root, query string) ([]SearchMatch, error) 
 	if q == "" {
 		return matches, nil
 	}
-	needle := strings.ToLower(q)
 
-	walkErr := filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil // skip unreadable entries rather than aborting the whole search
+	rgPath, err := ripgrepPath()
+	if err != nil {
+		return nil, err
+	}
+
+	args := []string{"--json", "--fixed-strings", "--ignore-case", "--max-filesize", maxSearchFileSizeArg}
+	for _, dir := range searchSkipDirs {
+		args = append(args, "--glob", "!"+dir)
+	}
+	args = append(args, "--", q, ".")
+
+	cmd := exec.Command(rgPath, args...)
+	cmd.Dir = absRoot
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("ripgrep: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("ripgrep: %w", err)
+	}
+
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for scanner.Scan() {
+		var event rgEvent
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			continue // skip a malformed/unexpected line rather than aborting the whole search
 		}
+		if event.Type != "match" {
+			continue
+		}
+		column := 1
+		if len(event.Data.Submatches) > 0 {
+			column = event.Data.Submatches[0].Start + 1
+		}
+		rel := strings.TrimPrefix(filepath.ToSlash(event.Data.Path.Text), "./")
+		matches = append(matches, SearchMatch{
+			Path:    rel,
+			Line:    event.Data.LineNumber,
+			Column:  column,
+			Preview: truncatePreview(event.Data.Lines.Text),
+		})
 		if len(matches) >= maxSearchMatches {
-			return fs.SkipAll
+			break
 		}
-		name := d.Name()
-		if d.IsDir() {
-			if path != absRoot && (strings.HasPrefix(name, ".") || searchSkipDirs[name]) {
-				return fs.SkipDir
-			}
-			return nil
+	}
+	_ = cmd.Process.Kill() // enforce the cap by stopping rg early; no-op if it already exited on its own
+	waitErr := cmd.Wait()
+
+	if waitErr != nil {
+		// Exit code 1 with no output means "no matches" - a normal empty
+		// result, not a failure. If we already have matches (including via
+		// the early-kill above), the wait error is irrelevant either way.
+		var exitErr *exec.ExitError
+		if len(matches) == 0 && errors.As(waitErr, &exitErr) && exitErr.ExitCode() == 1 {
+			return matches, nil
 		}
-		if strings.HasPrefix(name, ".") {
-			return nil
+		if len(matches) > 0 {
+			return matches, nil
 		}
-		info, err := d.Info()
-		if err != nil || info.Size() > maxSearchFileSize {
-			return nil
+		message := strings.TrimSpace(stderr.String())
+		if message == "" {
+			message = waitErr.Error()
 		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-		if bytes.IndexByte(data, 0) >= 0 {
-			return nil // binary file
-		}
-		rel, err := filepath.Rel(absRoot, path)
-		if err != nil {
-			return nil
-		}
-		relSlash := filepath.ToSlash(rel)
-		lineNum := 0
-		for _, line := range strings.Split(string(data), "\n") {
-			lineNum++
-			idx := strings.Index(strings.ToLower(line), needle)
-			if idx < 0 {
-				continue
-			}
-			matches = append(matches, SearchMatch{Path: relSlash, Line: lineNum, Column: idx + 1, Preview: truncatePreview(line)})
-			if len(matches) >= maxSearchMatches {
-				return fs.SkipAll
-			}
-		}
-		return nil
-	})
-	if walkErr != nil && walkErr != fs.SkipAll {
-		return nil, walkErr
+		return nil, fmt.Errorf("ripgrep: %s", message)
 	}
 	return matches, nil
 }
