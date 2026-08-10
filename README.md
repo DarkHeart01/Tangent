@@ -162,7 +162,10 @@ swarm replay <trace-id>                 Re-execute a historical trace
 swarm cost [<trace-id>]                 Token usage and cost report
 swarm dashboard                         Start local API + dashboard
 swarm doctor                            Validate environment + credentials
+swarm mcp                               Run the context-import MCP server (stdio)
 ```
+
+See [docs/mcp-context-import.md](docs/mcp-context-import.md) for pulling Claude Code / Cursor session context into the swarm's memory.
 
 ---
 

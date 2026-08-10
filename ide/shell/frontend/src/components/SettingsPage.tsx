@@ -1,4 +1,7 @@
-import { useSettings, setSettings, resetSettings, type Settings } from "../lib/settings";
+import { useState } from "react";
+import { useSettings, setSettings, resetSettings, effectiveLevel, ADAPTIVE_ESCALATION_THRESHOLD, type Settings } from "../lib/settings";
+import { useWorkspace } from "../lib/WorkspaceContext";
+import * as wailsClient from "../lib/wailsClient";
 
 function Row({ title, description, children }: { title: string; description: string; children: React.ReactNode }) {
   return <div className="settings-row">
@@ -20,9 +23,30 @@ function Toggle({ value, onChange }: { value: boolean; onChange: (v: boolean) =>
   </button>;
 }
 
+const LEVEL_LABELS: Record<Settings["codeIntelLevel"], string> = {
+  low: "Low — file-level only",
+  mid: "Mid — file + folder-level",
+  high: "High — file + folder + root-level",
+  adaptive: "Adaptive — starts low, unlocks more as you accept suggestions",
+};
+
 export default function SettingsPage({ onClose }: { onClose: () => void }) {
   const settings = useSettings();
+  const { workspace } = useWorkspace();
+  const [scanState, setScanState] = useState<"idle" | "scanning" | "done" | "error">("idle");
   const set = <K extends keyof Settings>(key: K, value: Settings[K]) => setSettings({ [key]: value } as Partial<Settings>);
+  const level = effectiveLevel(settings);
+
+  const runScan = async () => {
+    if (!workspace?.rootPath) return;
+    setScanState("scanning");
+    try {
+      await wailsClient.codeIntelScanProject(workspace.rootPath);
+      setScanState("done");
+    } catch {
+      setScanState("error");
+    }
+  };
 
   return <div className="settings-page">
     <div className="settings-page__header">
@@ -63,6 +87,41 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
         <h2>Terminal</h2>
         <Row title="Font Size" description="Controls the integrated terminal font size in pixels.">
           <NumberField value={settings.terminalFontSize} min={8} max={40} onChange={(n) => set("terminalFontSize", n)} />
+        </Row>
+      </section>
+
+      <section>
+        <h2>Code Intelligence</h2>
+        <Row title="Live Code Intelligence" description="Detect broken imports and calls as you type and suggest fixes to review. Off by default; spawns a language server for the open workspace when enabled. Requires a folder opened via Open Folder (not a browser-only workspace).">
+          <Toggle value={settings.codeIntelEnabled} onChange={(v) => set("codeIntelEnabled", v)} />
+        </Row>
+        <Row title="Python support (best-effort)" description="Tier B: detects unresolved local imports via filesystem checks, not a real Python language server -- no type checking. Only takes effect while Live Code Intelligence is on.">
+          <Toggle value={settings.codeIntelPythonEnabled} onChange={(v) => set("codeIntelPythonEnabled", v)} />
+        </Row>
+        <Row title="Intervention level" description="Cumulative: each level adds scope on top of the last. File-level always includes inline ghost-text completion and fixes for broken references.">
+          <select value={settings.codeIntelLevel} onChange={(event) => set("codeIntelLevel", event.target.value as Settings["codeIntelLevel"])}>
+            {(Object.keys(LEVEL_LABELS) as Settings["codeIntelLevel"][]).map((key) => (
+              <option key={key} value={key}>{LEVEL_LABELS[key]}</option>
+            ))}
+          </select>
+        </Row>
+        {settings.codeIntelLevel === "adaptive" && (
+          <Row title="Adaptive progress" description="Escalates automatically as you accept suggestions -- no action needed here.">
+            <span className="settings-adaptive-progress">
+              {level === 1 && `${settings.codeIntelAdaptiveProgress.low}/${ADAPTIVE_ESCALATION_THRESHOLD} accepted to unlock folder-level`}
+              {level === 2 && `${settings.codeIntelAdaptiveProgress.mid}/${ADAPTIVE_ESCALATION_THRESHOLD} accepted to unlock root-level`}
+              {level === 3 && "All levels unlocked"}
+            </span>
+          </Row>
+        )}
+        <Row title="Scan Project" description="Root-level (Level 3): detects environment variables used in the codebase and proposes a .env.example covering them. Requires Level 3 (High or escalated Adaptive) and a folder opened via Open Folder.">
+          <button
+            className="text-button"
+            disabled={level < 3 || !workspace?.backendRoot || scanState === "scanning"}
+            onClick={() => void runScan()}
+          >
+            {scanState === "scanning" ? "Scanning…" : scanState === "done" ? "Scanned ✓" : scanState === "error" ? "Scan failed — retry" : "Scan Project"}
+          </button>
         </Row>
       </section>
 

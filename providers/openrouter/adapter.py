@@ -147,6 +147,14 @@ class OpenRouterAdapter(LLMProvider):
             payload["tool_choice"] = "auto"
         if max_tokens:
             payload["max_tokens"] = max_tokens
+        # Passthrough for OpenRouter's `reasoning` field -- e.g.
+        # {"enabled": False} to turn off a reasoning model's hidden
+        # chain-of-thought tokens for latency-sensitive callers (see
+        # cli/main.py's codeintel-complete, where deepseek-v4-pro's default
+        # reasoning was consuming most of a small max_tokens budget and
+        # returning empty completions).
+        if "reasoning" in kwargs:
+            payload["reasoning"] = kwargs["reasoning"]
 
         with Span(tracer, "openrouter.complete", "llm", model=model) as span:
             try:

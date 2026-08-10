@@ -13,6 +13,21 @@ export type Settings = {
   editorMinimap: boolean;
   editorLineNumbers: boolean;
   terminalFontSize: number;
+  // Live Code Intelligence Engine (ide/shell/internal/codeintel): off by
+  // default until proven low-noise (spec §8's opt-in requirement) -- enabling
+  // spawns a real typescript-language-server process per workspace.
+  codeIntelEnabled: boolean;
+  // Per-adapter toggle (spec §7) for the Tier B Python adapter specifically
+  // -- only takes effect while codeIntelEnabled is also on. No subprocess
+  // involved (regex + filesystem checks), so it defaults on.
+  codeIntelPythonEnabled: boolean;
+  // Cumulative intervention level: low = file-level only, mid = +folder,
+  // high = +root, adaptive = starts at low and auto-escalates as
+  // suggestions get accepted (see codeIntelAdaptiveProgress/effectiveLevel).
+  codeIntelLevel: "low" | "mid" | "high" | "adaptive";
+  // Adaptive-mode-only: accepted-suggestion counters per level, driving
+  // escalation at 3 (see effectiveLevel). Not used in manual (non-adaptive) modes.
+  codeIntelAdaptiveProgress: { low: number; mid: number };
 };
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -23,7 +38,25 @@ export const DEFAULT_SETTINGS: Settings = {
   editorMinimap: true,
   editorLineNumbers: true,
   terminalFontSize: 13,
+  codeIntelEnabled: false,
+  codeIntelPythonEnabled: true,
+  codeIntelLevel: "low",
+  codeIntelAdaptiveProgress: { low: 0, mid: 0 },
 };
+
+export const ADAPTIVE_ESCALATION_THRESHOLD = 3;
+
+/** Maps the level setting to the numeric level (1/2/3) Go's Engine.SetLevel expects. */
+export function effectiveLevel(settings: Settings): 1 | 2 | 3 {
+  if (settings.codeIntelLevel === "low") return 1;
+  if (settings.codeIntelLevel === "mid") return 2;
+  if (settings.codeIntelLevel === "high") return 3;
+  // adaptive
+  const { low, mid } = settings.codeIntelAdaptiveProgress;
+  if (low < ADAPTIVE_ESCALATION_THRESHOLD) return 1;
+  if (mid < ADAPTIVE_ESCALATION_THRESHOLD) return 2;
+  return 3;
+}
 
 const KEY = "tangent.ide.settings";
 
@@ -60,6 +93,24 @@ export function setSettings(patch: Partial<Settings>) {
 
 export function resetSettings() {
   setSettings(DEFAULT_SETTINGS);
+}
+
+/**
+ * Adaptive-mode bookkeeping: call whenever a suggestion is accepted. A no-op
+ * outside adaptive mode. Counters are per-level and independent of the
+ * *current* effective level -- accepting a Level 1 suggestion always grows
+ * the "low" counter, which is what ungates Level 2 once it hits the
+ * threshold (see effectiveLevel).
+ */
+export function recordAdaptiveAcceptance(acceptedLevel: 1 | 2 | 3) {
+  if (current.codeIntelLevel !== "adaptive") return;
+  const progress = { ...current.codeIntelAdaptiveProgress };
+  if (acceptedLevel === 1 && progress.low < ADAPTIVE_ESCALATION_THRESHOLD) {
+    progress.low += 1;
+  } else if (acceptedLevel === 2 && progress.mid < ADAPTIVE_ESCALATION_THRESHOLD) {
+    progress.mid += 1;
+  }
+  setSettings({ codeIntelAdaptiveProgress: progress });
 }
 
 export function subscribeSettings(listener: (s: Settings) => void): () => void {

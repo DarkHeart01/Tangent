@@ -6,6 +6,58 @@ export function CloseTerminal(arg1) {
   return window['go']['main']['SessionAPI']['CloseTerminal'](arg1);
 }
 
+export function CodeIntelAcceptSuggestion(arg1) {
+  return window['go']['main']['SessionAPI']['CodeIntelAcceptSuggestion'](arg1);
+}
+
+export function CodeIntelArmIdleFallback(arg1, arg2, arg3) {
+  return window['go']['main']['SessionAPI']['CodeIntelArmIdleFallback'](arg1, arg2, arg3);
+}
+
+export function CodeIntelCompleteInline(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['SessionAPI']['CodeIntelCompleteInline'](arg1, arg2, arg3, arg4);
+}
+
+export function CodeIntelFileSaved(arg1, arg2) {
+  return window['go']['main']['SessionAPI']['CodeIntelFileSaved'](arg1, arg2);
+}
+
+export function CodeIntelForgetFile(arg1, arg2) {
+  return window['go']['main']['SessionAPI']['CodeIntelForgetFile'](arg1, arg2);
+}
+
+export function CodeIntelRejectSuggestion(arg1) {
+  return window['go']['main']['SessionAPI']['CodeIntelRejectSuggestion'](arg1);
+}
+
+export function CodeIntelScanProject(arg1) {
+  return window['go']['main']['SessionAPI']['CodeIntelScanProject'](arg1);
+}
+
+export function CodeIntelSetEnabled(arg1, arg2) {
+  return window['go']['main']['SessionAPI']['CodeIntelSetEnabled'](arg1, arg2);
+}
+
+export function CodeIntelSetFocus(arg1, arg2, arg3) {
+  return window['go']['main']['SessionAPI']['CodeIntelSetFocus'](arg1, arg2, arg3);
+}
+
+export function CodeIntelSetLevel(arg1) {
+  return window['go']['main']['SessionAPI']['CodeIntelSetLevel'](arg1);
+}
+
+export function CodeIntelSetPythonEnabled(arg1) {
+  return window['go']['main']['SessionAPI']['CodeIntelSetPythonEnabled'](arg1);
+}
+
+export function CodeIntelSignalScopeExit(arg1, arg2, arg3) {
+  return window['go']['main']['SessionAPI']['CodeIntelSignalScopeExit'](arg1, arg2, arg3);
+}
+
+export function CodeIntelUpdateFile(arg1, arg2, arg3, arg4, arg5, arg6, arg7) {
+  return window['go']['main']['SessionAPI']['CodeIntelUpdateFile'](arg1, arg2, arg3, arg4, arg5, arg6, arg7);
+}
+
 export function CreateTerminal(arg1, arg2, arg3) {
   return window['go']['main']['SessionAPI']['CreateTerminal'](arg1, arg2, arg3);
 }

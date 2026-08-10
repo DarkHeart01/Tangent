@@ -14,10 +14,17 @@ import SearchPanel from "./components/SearchPanel";
 import SettingsPage from "./components/SettingsPage";
 import ContextMenu, { type ContextMenuItem } from "./components/ContextMenu";
 import { WorkspaceProvider, useWorkspace } from "./lib/WorkspaceContext";
+import { CodeIntelProvider, useCodeIntel } from "./lib/codeintel/CodeIntelContext";
+import CodeIntelSuggestionPanel from "./components/CodeIntelSuggestionPanel";
+import { useSettings, effectiveLevel } from "./lib/settings";
+import * as wailsClient from "./lib/wailsClient";
 
 function Shell() {
   const { activeSessionId, activeWsClient, reconnectActiveWs, newSession } = useSession();
   const { workspace, createFile, createFolder, openFolder, closeWorkspace } = useWorkspace();
+  const { enabled: codeIntelEnabled, setEnabledForWorkspace, diagnosticsByFile, diagnosticCount } = useCodeIntel();
+  const settings = useSettings();
+  const { codeIntelPythonEnabled } = settings;
   const wsStatus = activeWsClient?.status ?? "closed";
   const [bottomTab, setBottomTab] = useState<"terminal" | "problems" | "output" | "debug">("terminal");
   const [explorerWidth, setExplorerWidth] = useState(240);
@@ -32,6 +39,31 @@ function Shell() {
     window.addEventListener("tangent:focus-terminal", focusTerminal);
     return () => window.removeEventListener("tangent:focus-terminal", focusTerminal);
   }, []);
+  // The engine needs real filesystem access (it spawns a language server
+  // with the workspace as its cwd) -- only meaningful for a workspace opened
+  // through the native folder picker (workspace.backendRoot), not a
+  // browser File System Access API or single-file workspace. When no such
+  // workspace is open there's nothing valid to pass as a root; the Go side
+  // tears down any previous engine instance the next time this fires with a
+  // real root (or on app shutdown), so this is a no-op rather than a leak
+  // in the common case of switching between workspaces.
+  useEffect(() => {
+    if (workspace?.backendRoot && workspace.rootPath) {
+      void setEnabledForWorkspace(workspace.rootPath, codeIntelEnabled).catch(() => {});
+    }
+  }, [codeIntelEnabled, workspace?.backendRoot, workspace?.rootPath, setEnabledForWorkspace]);
+  // Per-adapter toggle (spec §7): independent of the master switch above,
+  // only meaningful once it's on.
+  useEffect(() => {
+    if (codeIntelEnabled) void wailsClient.codeIntelSetPythonEnabled(codeIntelPythonEnabled).catch(() => {});
+  }, [codeIntelEnabled, codeIntelPythonEnabled]);
+  // Three-level suggestion system: push the resolved numeric level (manual
+  // or adaptive-derived) whenever it changes. Level 1 is always active once
+  // enabled; this only gates whether folder/root-level triggers can fire.
+  const level = effectiveLevel(settings);
+  useEffect(() => {
+    if (codeIntelEnabled) void wailsClient.codeIntelSetLevel(level).catch(() => {});
+  }, [codeIntelEnabled, level]);
   // Opening a file (incl. from a search result) should surface the editor.
   useEffect(() => {
     const showEditor = () => setShowSettings(false);
@@ -109,7 +141,7 @@ function Shell() {
           <section className="bottom-panel" style={{ height: bottomHeight }}>
             <div className="bottom-panel__tabs">
               <button className={bottomTab === "terminal" ? "is-active" : ""} onClick={() => setBottomTab("terminal")}>Terminal</button>
-              <button className={bottomTab === "problems" ? "is-active" : ""} onClick={() => setBottomTab("problems")}>Problems <span className="panel-count">0</span></button>
+              <button className={bottomTab === "problems" ? "is-active" : ""} onClick={() => setBottomTab("problems")}>Problems <span className="panel-count">{diagnosticCount}</span></button>
               <button className={bottomTab === "output" ? "is-active" : ""} onClick={() => setBottomTab("output")}>Output</button>
               <button className={bottomTab === "debug" ? "is-active" : ""} onClick={() => setBottomTab("debug")}>Debug Console</button>
               <span className="bottom-panel__spacer" />
@@ -122,7 +154,37 @@ function Shell() {
                   time a folder opens. Existing terminals persist; new ones open
                   in the current workspace cwd, like a real IDE. */}
               <div className="bottom-panel__terminal-host" hidden={bottomTab !== "terminal"}><Terminal /></div>
-              {bottomTab === "problems" && <div className="bottom-panel__empty"><strong>No problems detected</strong><span>Problems will appear here after a file or task reports diagnostics.</span></div>}
+              {bottomTab === "problems" && (diagnosticCount === 0 ? (
+                <div className="bottom-panel__empty"><strong>No problems detected</strong><span>Problems will appear here after a file or task reports diagnostics.</span></div>
+              ) : (
+                <div className="problems-list">
+                  {Array.from(diagnosticsByFile.entries()).flatMap(([filePath, edges]) =>
+                    edges.map((edge) => {
+                      const relPath = workspace?.rootPath && filePath.startsWith(workspace.rootPath)
+                        ? filePath.slice(workspace.rootPath.length).replace(/^[/\\]/, "")
+                        : filePath;
+                      return (
+                        <div
+                          key={edge.id}
+                          className={`problems-list__item ${edge.resolution_state === "resolution-failed" ? "problems-list__item--failed" : ""}`}
+                          onClick={() => window.dispatchEvent(new CustomEvent("tangent:open-file", { detail: { path: relPath, preview: false, line: edge.span.start_line + 1 } }))}
+                        >
+                          <span className="codicon codicon-error" />
+                          <span>
+                            <strong>{edge.message || `Unresolved reference: ${edge.to_name}`}</strong>
+                            <span>{relPath}:{edge.span.start_line + 1}</span>
+                            {edge.cross_language && (
+                              <span className="problems-list__confidence" title={`Cross-language match via ${edge.bridge_adapter ?? "unknown adapter"}`}>
+                                {edge.bridge_adapter === "openapi-schema" ? "schema" : edge.bridge_adapter ?? "bridge"} · {Math.round(edge.confidence * 100)}%
+                              </span>
+                            )}
+                          </span>
+                        </div>
+                      );
+                    }),
+                  )}
+                </div>
+              ))}
               {bottomTab === "output" && <div className="bottom-panel__empty"><strong>Output channel ready</strong><span>Agent and tool output is streamed in the Terminal channel.</span></div>}
               {bottomTab === "debug" && <div className="bottom-panel__empty"><strong>Debug console</strong><span>Connect a running session to inspect runtime events.</span></div>}
             </div>
@@ -156,6 +218,7 @@ function Shell() {
       {/* Git/Source Control UI is intentionally disabled for now. The backend
           and SourceControl component remain available for a future re-enable. */}
       <footer className="status-bar"><span className="status-bar__spacer" /><span className="status-bar__item">{workspace?.rootPath ?? "No folder opened"}</span></footer>
+      {codeIntelEnabled && <CodeIntelSuggestionPanel />}
     </div>
   );
 }
@@ -163,7 +226,7 @@ function Shell() {
 function App() {
   return (
     <WorkspaceProvider>
-      <SessionProvider><Shell /></SessionProvider>
+      <SessionProvider><CodeIntelProvider><Shell /></CodeIntelProvider></SessionProvider>
     </WorkspaceProvider>
   );
 }

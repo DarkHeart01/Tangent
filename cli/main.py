@@ -858,6 +858,259 @@ def dashboard(
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
 
+# ── mcp ───────────────────────────────────────────────────────────────────────
+
+@cli.command("mcp")
+@click.option("--memory-dir", envvar="SWARM_MEMORY_DIR", default="./memory_store", show_default=True)
+def mcp_serve(memory_dir: str) -> None:
+    """Run the context-import MCP server (stdio transport).
+
+    Register this as an MCP server inside Claude Code or Cursor so their own
+    agent can pull a session's context into Tangent's long-term memory. See
+    docs/mcp-context-import.md for the config snippet.
+    """
+    os.environ.setdefault("SWARM_MEMORY_DIR", memory_dir)
+    from mcp_server.server import main as mcp_main
+
+    mcp_main()
+
+
+# ── codeintel-suggest ────────────────────────────────────────────────────────
+
+_CODEINTEL_RESPONSE_CONTRACT = """
+Respond with ONLY a single JSON object, no markdown code fences, no commentary, in exactly this shape:
+{"explanation": "<one or two sentences on what you're proposing, or why not>", "files": [{"path": "<file path relative to the project root>", "proposed_content": "<the FULL new content of that file>"}]}
+
+Rules:
+- "proposed_content" must be each file's full new content, not a diff or a snippet.
+- If you have nothing worth proposing, return {"explanation": "<why not>", "files": []}. An empty "files" list is a valid, expected answer -- don't force a suggestion that isn't warranted.
+"""
+
+# Level 1 (file-scoped): repair a confirmed-broken reference.
+_CODEINTEL_FIX_PROMPT = """You are a code-fix assistant embedded in an IDE's live diagnostics engine. \
+You will be given a snippet of code containing a reference (import, function call, etc.) that the \
+language server could not resolve, plus its surrounding context. Propose a minimal, concrete fix.
+""" + _CODEINTEL_RESPONSE_CONTRACT + """
+- "files" may contain more than one entry only if the fix genuinely requires touching more than one file (e.g. adding an export AND updating the importer). Prefer a single-file fix when possible.
+"""
+
+# Level 2 (folder-scoped): may propose new files, not just edits.
+_CODEINTEL_FOLDER_PROMPT = """You are a code-assistant embedded in an IDE, reviewing everything just saved in \
+one folder alongside its sibling files. Look for something concretely missing or inconsistent at the folder \
+level -- e.g. a file that imports/exports something its siblings don't provide, an obviously-needed companion \
+file (a barrel/index file, a test file mirroring an existing pattern in the folder, a missing type-definitions \
+file) -- not general code review of individual functions (that's a different, file-scoped pass).
+""" + _CODEINTEL_RESPONSE_CONTRACT + """
+- You may propose brand-new files as well as edits to existing ones -- "proposed_content" is the same either way (the file's full content).
+- Only propose something if the folder's existing pattern makes it clearly warranted. When in doubt, return no files.
+"""
+
+# Level 3 (root-scoped): project scaffolding. v1 concretely covers env-var
+# usage -> .env, per the plan's stated scope cut (not a generic "what's
+# missing" oracle).
+_CODEINTEL_ROOT_PROMPT = """You are a project-scaffolding assistant embedded in an IDE. You will be given a \
+list of environment variable names detected via static analysis of the codebase (process.env.X, os.environ, \
+os.getenv, etc.) and the current contents of the project's .env or .env.example file (which may be empty or \
+absent). Propose an updated .env.example (never a real .env with guessed secrets) that declares every \
+detected variable.
+""" + _CODEINTEL_RESPONSE_CONTRACT + """
+- Use ".env.example" as the path, not ".env" -- never write a file that looks like it holds real secrets.
+- Values must be harmless placeholders (e.g. "CHANGEME", or a realistic-shaped but obviously-fake example for well-known variables like PORT=3000) -- never invent a real-looking API key, password, or token.
+- Preserve every variable and comment already present in the existing file; only add what's missing.
+"""
+
+_CODEINTEL_PROMPTS = {
+    "fix": _CODEINTEL_FIX_PROMPT,
+    "folder": _CODEINTEL_FOLDER_PROMPT,
+    "root": _CODEINTEL_ROOT_PROMPT,
+}
+
+
+def _codeintel_build_provider(cfg: "SwarmConfig"):  # type: ignore[name-defined]
+    """Construct a single provider adapter directly, skipping the registry/
+    bootstrap machinery in core/registry.py -- that also autodiscovers every
+    tool and agent spec on disk, which this one-shot completion doesn't need
+    and shouldn't pay the cost of on what's meant to be a fast call."""
+    name = cfg.provider or "openrouter"
+    if name == "groq" and cfg.groq_api_key:
+        from providers.groq.adapter import GroqAdapter
+        return GroqAdapter(api_key=cfg.groq_api_key, default_model=cfg.default_model)
+    if name == "openrouter" and cfg.openrouter_api_key:
+        from providers.openrouter.adapter import OpenRouterAdapter
+        return OpenRouterAdapter(api_key=cfg.openrouter_api_key, default_model=cfg.default_model)
+    if name == "gemini" and cfg.gemini_api_key:
+        from providers.gemini.adapter import GeminiAdapter
+        return GeminiAdapter(api_key=cfg.gemini_api_key, default_model=cfg.default_model)
+    if name == "openai" and cfg.openai_api_key:
+        from providers.openai.adapter import OpenAIAdapter
+        return OpenAIAdapter(api_key=cfg.openai_api_key, default_model=cfg.default_model)
+    raise click.ClickException(f"No API key configured for provider '{name}' (set it in .env)")
+
+
+def _codeintel_build_prompt(request: dict[str, Any]) -> str:
+    suggestion_type = request.get("suggestion_type") or "fix"
+    parts = [f"Language: {request.get('language', 'unknown')}", f"File: {request.get('file_path', 'unknown')}"]
+
+    if suggestion_type == "fix":
+        parts.append(f"Unresolved reference: {request.get('symbol', '?')} (kind: {request.get('kind', '?')})")
+        candidates = request.get("candidates") or []
+        if candidates:
+            parts.append("Known related signature/type info:\n" + "\n".join(str(c) for c in candidates))
+        parts.append("Surrounding code:\n```\n" + str(request.get("snippet", "")) + "\n```")
+    elif suggestion_type in ("folder", "root"):
+        parts.append(str(request.get("snippet", "")))
+        for f in request.get("context") or []:
+            if isinstance(f, dict) and f.get("path"):
+                parts.append(f"--- {f['path']} ---\n```\n{f.get('content', '')}\n```")
+
+    return "\n\n".join(parts)
+
+
+def _codeintel_strip_fences(text: str) -> str:
+    """Every codeintel-* system prompt asks for no markdown fences; strip
+    them if the model supplied them anyway rather than failing outright.
+    Handles a leading language tag (```json, ```python, ```typescript, ...)
+    as well as a bare ``` fence."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = text[3:]
+        first_line, _, rest = text.partition("\n")
+        if first_line.strip().isalnum() or first_line.strip() == "":
+            text = rest
+        text = text.rstrip("`").strip()
+    return text
+
+
+def _codeintel_parse_response(content: Optional[str]) -> dict[str, Any]:
+    text = _codeintel_strip_fences(content or "")
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return {"explanation": "Model did not return valid JSON.", "files": []}
+    if not isinstance(parsed, dict):
+        return {"explanation": "Unexpected response shape.", "files": []}
+    files = [
+        {"path": str(f["path"]), "proposed_content": str(f.get("proposed_content", ""))}
+        for f in parsed.get("files", [])
+        if isinstance(f, dict) and f.get("path")
+    ]
+    return {"explanation": str(parsed.get("explanation", "")), "files": files}
+
+
+@cli.command("codeintel-suggest")
+def codeintel_suggest() -> None:
+    """Generate one fix suggestion for a dangling code reference.
+
+    Reads a JSON request on stdin (from ide/shell/internal/codeintel's
+    suggestion.go) and writes a JSON suggestion to stdout. Deliberately
+    bypasses the swarm/agent/task-graph machinery -- reuses only the
+    LLMProvider.complete() interface every agent already goes through
+    (providers/base.py), since a single bounded completion doesn't need
+    orchestration, a budget ledger, or a topology.
+    """
+    from configs.loader import load_swarm_config
+
+    raw = sys.stdin.read()
+    try:
+        request = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(f"invalid JSON request on stdin: {exc}")
+
+    suggestion_type = request.get("suggestion_type") or "fix"
+    system_prompt = _CODEINTEL_PROMPTS.get(suggestion_type, _CODEINTEL_FIX_PROMPT)
+    # Folder/root requests carry multi-file context and may propose several
+    # whole files back -- a fix request is single-snippet, single-file.
+    max_tokens = 4000 if suggestion_type in ("folder", "root") else 1500
+
+    cfg = load_swarm_config({})
+    # Every other command calls this before logging anything (see `run`,
+    # `dashboard`). Skipping it here left structlog on its unconfigured
+    # default, which prints to stdout -- silently corrupting the JSON this
+    # command's caller (ide/shell/internal/codeintel's SuggestionGenerator)
+    # parses from stdout. Found via ide/shell's Go integration tests: every
+    # suggestion request was failing with "decode response: invalid
+    # character '-' after top-level value" (a log line's leading digits
+    # parsed as a bare JSON number, then choked on the next character).
+    _setup_logging(cfg)
+    provider = _codeintel_build_provider(cfg)
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": _codeintel_build_prompt(request)},
+    ]
+
+    result = asyncio.run(provider.complete(messages, model=cfg.default_model, temperature=0.2, max_tokens=max_tokens))
+    suggestion = _codeintel_parse_response(result.content)
+    click.echo(json.dumps(suggestion))
+
+
+# ── codeintel-complete ───────────────────────────────────────────────────────
+
+# Live, per-keystroke inline completion (spec: "just like GitHub Copilot or
+# Cursor" -- ghost text as you type, Tab to accept) -- a genuinely different
+# request/response shape than codeintel-suggest's {explanation, files}, so
+# it's a separate command rather than another suggestion_type: a completion
+# is "insert this text at the cursor", not a reviewed file edit.
+# Deliberately short. A longer, rules-list version of this prompt (tried
+# during development) made the model ignore the reasoning={"enabled": False}
+# request below -- verified directly against OpenRouter: the elaborate
+# prompt got reasoning_tokens=400/400 (fully consumed, empty content) on
+# 5/5 trials, while this shorter phrasing got reasoning_tokens=0 on 5/5,
+# with correct output every time. Keep this short on any future edit.
+_CODEINTEL_COMPLETE_PROMPT = """You are an inline code completion engine, like GitHub Copilot. Given the prefix \
+and suffix around the cursor, output ONLY the exact text to insert at the cursor -- no explanation, no markdown \
+fences, no repeating the prefix or suffix. If the prefix ends mid function/class/block, complete its full body, \
+not just the current line. If nothing sensible can be predicted, output nothing."""
+
+
+def _codeintel_build_completion_prompt(request: dict[str, Any]) -> str:
+    return (
+        f"Language: {request.get('language', 'unknown')}\n"
+        f"File: {request.get('file_path', 'unknown')}\n\n"
+        f"Prefix (code before the cursor):\n```\n{request.get('prefix', '')}\n```\n\n"
+        f"Suffix (code after the cursor):\n```\n{request.get('suffix', '')}\n```"
+    )
+
+
+@cli.command("codeintel-complete")
+def codeintel_complete() -> None:
+    """Generate one inline completion (ghost text) for the current cursor position.
+
+    Reads a JSON request ({language, file_path, prefix, suffix}) on stdin
+    and writes {"insert_text": "..."} to stdout. Separate from
+    codeintel-suggest: a completion is a short, low-latency text insertion,
+    not a reviewed multi-file suggestion, so it gets its own minimal
+    request/response shape and a much smaller token budget.
+    """
+    from configs.loader import load_swarm_config
+
+    raw = sys.stdin.read()
+    try:
+        request = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(f"invalid JSON request on stdin: {exc}")
+
+    cfg = load_swarm_config({})
+    _setup_logging(cfg)  # see codeintel_suggest's comment -- stdout must stay pure JSON
+    provider = _codeintel_build_provider(cfg)
+    messages = [
+        {"role": "system", "content": _CODEINTEL_COMPLETE_PROMPT},
+        {"role": "user", "content": _codeintel_build_completion_prompt(request)},
+    ]
+
+    # reasoning={"enabled": False}: the configured model (deepseek-v4-pro) is
+    # a reasoning model that otherwise spends its max_tokens budget on hidden
+    # chain-of-thought before ever emitting visible content -- verified this
+    # was silently producing empty completions and ~3x the latency. Disabling
+    # it is what makes a full function-body completion (not just the current
+    # line) land reliably within a few seconds instead of most attempts
+    # coming back empty.
+    result = asyncio.run(provider.complete(
+        messages, model=cfg.default_model, temperature=0.2, max_tokens=400, reasoning={"enabled": False},
+    ))
+    insert_text = _codeintel_strip_fences(result.content or "")
+    click.echo(json.dumps({"insert_text": insert_text}))
+
+
 # ── doctor ────────────────────────────────────────────────────────────────────
 
 @cli.command()

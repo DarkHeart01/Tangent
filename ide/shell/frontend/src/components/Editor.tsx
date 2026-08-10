@@ -8,9 +8,13 @@ import * as wailsClient from "../lib/wailsClient";
 import type { FileNode } from "../lib/wailsClient";
 import { useWorkspace } from "../lib/WorkspaceContext";
 import { logInfo, reportError } from "../lib/errorReporting";
-import { useSettings } from "../lib/settings";
+import { useSettings, effectiveLevel } from "../lib/settings";
 import mascot from "../assets/meow_mascot.png";
 import ContextMenu, { type ContextMenuItem } from "./ContextMenu";
+import { useCodeIntel } from "../lib/codeintel/CodeIntelContext";
+import { parseIncremental, findEnclosingScope, forgetFile, getTree, type TextEdit, type Span as CISpan } from "../lib/codeintel/treeSitter";
+import { registerInlineCompletionProvider } from "../lib/codeintel/inlineCompletion";
+import type * as monacoNS from "monaco-editor";
 
 type OpenTab = { path: string; content: string; savedContent: string; dirty: boolean; saving: boolean; preview: boolean };
 
@@ -85,6 +89,24 @@ function languageFor(path: string): string {
   if (["yaml", "yml"].includes(ext ?? "")) return "yaml";
   if (ext === "py") return "python";
   return "plaintext";
+}
+
+// Converts one Monaco content change (1-indexed line/column) into a
+// tree-sitter TextEdit (0-indexed row/column) -- Monaco's `changes` array
+// lists edits in descending document-offset order specifically so each one
+// can be applied without adjusting for the others, which is also exactly
+// what Tree.edit() needs called in that same order.
+function monacoChangeToTextEdit(change: monacoNS.editor.IModelContentChange): TextEdit {
+  const startIndex = change.rangeOffset;
+  const oldEndIndex = change.rangeOffset + change.rangeLength;
+  const newIndex = change.rangeOffset + change.text.length;
+  const startPosition = { row: change.range.startLineNumber - 1, column: change.range.startColumn - 1 };
+  const oldEndPosition = { row: change.range.endLineNumber - 1, column: change.range.endColumn - 1 };
+  const newlineCount = (change.text.match(/\n/g) ?? []).length;
+  const newEndPosition = newlineCount === 0
+    ? { row: startPosition.row, column: startPosition.column + change.text.length }
+    : { row: startPosition.row + newlineCount, column: change.text.length - change.text.lastIndexOf("\n") - 1 };
+  return { startIndex, oldEndIndex, newIndex, startPosition, oldEndPosition, newEndPosition };
 }
 
 function iconForPath(path: string): { icon: string; tone: string } {
@@ -337,6 +359,176 @@ export default function Editor({ treeOnly = false }: { treeOnly?: boolean } = {}
     if (!editorRef.current) return;
     gutterDecorationIds.current = editorRef.current.deltaDecorations(gutterDecorationIds.current, gutterDiff ? gutterDecorations(gutterDiff.original, gutterDiff.modified) : []);
   }, [gutterDiff]);
+
+  // ── Live Code Intelligence Engine (only the non-treeOnly instance runs
+  // this -- the sidebar's Editor instance never mounts Monaco at all, so
+  // registering these listeners there would be dead weight at best and a
+  // duplicate/conflicting CodeIntelUpdateFile call at worst). Needs real
+  // filesystem access (the Go engine spawns a language server rooted at the
+  // workspace), so it's further gated on workspace.backendRoot. ──
+  const { enabled: codeIntelEnabled, diagnosticsByFile } = useCodeIntel();
+  const codeIntelActive = !treeOnly && codeIntelEnabled && Boolean(workspace?.backendRoot);
+  const monacoNsRef = useRef<typeof monacoNS | null>(null);
+  const codeIntelDisposablesRef = useRef<{ dispose: () => void }[]>([]);
+  // Refs so the once-registered Monaco listeners (below) always see current
+  // state without needing to be torn down and re-registered on every
+  // keystroke/tab switch.
+  const codeIntelActiveRef = useRef(codeIntelActive);
+  const activeTabPathRef = useRef<string | null>(null);
+  const workspaceRootRef = useRef<string | null>(null);
+  const scopeSpansRef = useRef<Map<string, CISpan | null>>(new Map());
+  const pendingEditsRef = useRef<Map<string, TextEdit[]>>(new Map());
+  const parseTimerRef = useRef<number | null>(null);
+  useEffect(() => { codeIntelActiveRef.current = codeIntelActive; }, [codeIntelActive]);
+  useEffect(() => { workspaceRootRef.current = workspace?.rootPath ?? null; }, [workspace?.rootPath]);
+  // Tiering's focus/blur signal (spec §3: hot on focus, warm on losing
+  // focus) -- fires on every tab switch, demoting whatever was active
+  // before and promoting the new one.
+  useEffect(() => {
+    const previous = activeTabPathRef.current;
+    const next = activeTab?.path ?? null;
+    activeTabPathRef.current = next;
+    if (!codeIntelActive || !workspace?.rootPath) return;
+    if (previous && previous !== next) void wailsClient.codeIntelSetFocus(workspace.rootPath, previous, false);
+    if (next) void wailsClient.codeIntelSetFocus(workspace.rootPath, next, true);
+  }, [activeTab?.path, codeIntelActive, workspace?.rootPath]);
+
+  const isTreeSitterPath = (path: string) => /\.(ts|tsx|js|jsx)$/.test(path);
+  const isPythonPath = (path: string) => /\.py$/.test(path);
+  const isCodeIntelPath = (path: string) => isTreeSitterPath(path) || isPythonPath(path);
+
+  const flushCodeIntelParse = useCallback((path: string, content: string) => {
+    const root = workspaceRootRef.current;
+    if (!root) return;
+    const cursorLine = editorRef.current
+      ? ((editorRef.current as unknown as { getPosition?: () => { lineNumber: number } | null }).getPosition?.()?.lineNumber ?? 1) - 1
+      : 0;
+
+    if (isPythonPath(path)) {
+      // No tree-sitter grammar for Python (Tier B is regex/filesystem
+      // best-effort, entirely Go-side -- see py_adapter.go) -- send raw
+      // content and let the engine extract+resolve synchronously.
+      void wailsClient.codeIntelUpdateFile(root, path, content, [], [], true, cursorLine);
+      return;
+    }
+
+    const edits = pendingEditsRef.current.get(path) ?? [];
+    pendingEditsRef.current.delete(path);
+    parseIncremental(path, content, edits)
+      .then((result) => wailsClient.codeIntelUpdateFile(root, path, content, result.nodes, result.edges, !result.hasSyntaxError, cursorLine))
+      .catch(() => {
+        // A tree-sitter/backend hiccup here just means this one update is
+        // skipped -- forget the file's parser state so the next edit does a
+        // clean full parse instead of building on whatever went wrong.
+        forgetFile(path);
+      });
+  }, []);
+
+  const scheduleCodeIntelParse = useCallback((path: string, content: string, edit: TextEdit | null) => {
+    if (edit) {
+      const existing = pendingEditsRef.current.get(path) ?? [];
+      existing.push(edit);
+      pendingEditsRef.current.set(path, existing);
+    }
+    if (parseTimerRef.current !== null) window.clearTimeout(parseTimerRef.current);
+    parseTimerRef.current = window.setTimeout(() => flushCodeIntelParse(path, content), 250);
+  }, [flushCodeIntelParse]);
+
+  // Registered once in onMount (see the MonacoEditor below), not per-render:
+  // both read exclusively through refs so they stay correct across tab
+  // switches without needing to be re-subscribed.
+  const registerCodeIntelListeners = useCallback((editor: monacoNS.editor.IStandaloneCodeEditor) => {
+    codeIntelDisposablesRef.current.forEach((d) => d.dispose());
+    codeIntelDisposablesRef.current = [];
+
+    // Level 1's real ghost-text completion (see inlineCompletion.ts) --
+    // a global `languages` registration, not tied to this editor instance,
+    // so it's registered once (module-level guard) and reads current
+    // state through the same refs every other listener here uses.
+    if (monacoNsRef.current) {
+      registerInlineCompletionProvider(monacoNsRef.current, () => ({
+        enabled: codeIntelActiveRef.current,
+        root: workspaceRootRef.current,
+        path: activeTabPathRef.current,
+      }));
+    }
+
+    codeIntelDisposablesRef.current.push(editor.onDidChangeModelContent((event) => {
+      if (!codeIntelActiveRef.current) return;
+      const path = activeTabPathRef.current;
+      if (!path || !isCodeIntelPath(path)) return;
+      const model = editor.getModel();
+      if (!model) return;
+      const content = model.getValue();
+      if (isPythonPath(path)) {
+        scheduleCodeIntelParse(path, content, null); // no tree-sitter edits to accumulate
+        return;
+      }
+      for (const change of event.changes) {
+        scheduleCodeIntelParse(path, content, monacoChangeToTextEdit(change));
+      }
+    }));
+
+    codeIntelDisposablesRef.current.push(editor.onDidChangeCursorPosition((event) => {
+      if (!codeIntelActiveRef.current) return;
+      const path = activeTabPathRef.current;
+      const root = workspaceRootRef.current;
+      if (!path || !root || !isCodeIntelPath(path)) return;
+
+      if (isPythonPath(path)) {
+        // No parse tree to walk for structural scope-exit (Tier B has no
+        // grammar) -- Gate 3 falls back to file-level granularity: the
+        // idle timer alone decides when to sweep, batching every dangling
+        // import in the file together rather than per-function.
+        const model = editor.getModel();
+        const lineCount = model?.getLineCount() ?? 1;
+        void wailsClient.codeIntelArmIdleFallback(root, path, { start_line: 0, start_col: 0, end_line: lineCount, end_col: 0 });
+        return;
+      }
+
+      const tree = getTree(path);
+      if (!tree) return;
+      const row = event.position.lineNumber - 1;
+      const col = event.position.column - 1;
+      const scope = findEnclosingScope(tree, row, col);
+      const previous = scopeSpansRef.current.get(path) ?? null;
+      const changed = !previous || !scope
+        ? previous !== scope
+        : previous.start_line !== scope.start_line || previous.start_col !== scope.start_col || previous.end_line !== scope.end_line || previous.end_col !== scope.end_col;
+      if (changed) {
+        if (previous) void wailsClient.codeIntelSignalScopeExit(root, path, previous);
+        scopeSpansRef.current.set(path, scope);
+      }
+      if (scope) void wailsClient.codeIntelArmIdleFallback(root, path, scope);
+    }));
+  }, [scheduleCodeIntelParse]);
+
+  // Monaco markers (squiggles) for whatever diagnostics the context has for
+  // the active file -- separate from the parse/gate pipeline above, this
+  // just reflects state the context already receives from the
+  // "codeintel.diagnostics" Wails event.
+  useEffect(() => {
+    if (!codeIntelActive || !activeTab || !monacoNsRef.current || !editorRef.current) return;
+    const monaco = monacoNsRef.current;
+    const model = (editorRef.current as unknown as { getModel?: () => monacoNS.editor.ITextModel | null }).getModel?.();
+    if (!model) return;
+    const edges = diagnosticsByFile.get(activeTab.path) ?? [];
+    const markers: monacoNS.editor.IMarkerData[] = edges.map((edge) => ({
+      severity: edge.resolution_state === "resolution-failed" ? monaco.MarkerSeverity.Warning : monaco.MarkerSeverity.Error,
+      message: edge.message || `Unresolved reference: ${edge.to_name}`,
+      startLineNumber: edge.span.start_line + 1,
+      startColumn: edge.span.start_col + 1,
+      endLineNumber: edge.span.end_line + 1,
+      endColumn: edge.span.end_col + 1,
+    }));
+    monaco.editor.setModelMarkers(model, "tangent-codeintel", markers);
+  }, [codeIntelActive, activeTab, diagnosticsByFile]);
+
+  useEffect(() => () => {
+    codeIntelDisposablesRef.current.forEach((d) => d.dispose());
+    if (parseTimerRef.current !== null) window.clearTimeout(parseTimerRef.current);
+  }, []);
+
   const updateTab = useCallback((path: string, patch: Partial<OpenTab>) => setTabs((current) => ({ ...current, [path]: { ...current[path], ...patch } })), []);
 
   const save = useCallback(async (path: string) => {
@@ -346,8 +538,13 @@ export default function Editor({ treeOnly = false }: { treeOnly?: boolean } = {}
       if (activeSessionId) await wailsClient.writeFile(activeSessionId, path, tabs[path].content);
       else await saveFile(path, tabs[path].content);
       updateTab(path, { savedContent: tabs[path].content, dirty: false, saving: false });
+      // Level 2's trigger: on-demand (per save), not live -- see the plan's
+      // stated cost-control rationale for folder/root-level suggestions.
+      if (codeIntelActive && effectiveLevel(settings) >= 2 && workspace?.rootPath) {
+        void wailsClient.codeIntelFileSaved(workspace.rootPath, path);
+      }
     } catch (error) { updateTab(path, { saving: false }); setLoadError(String(error)); }
-  }, [activeSessionId, saveFile, tabs, updateTab]);
+  }, [activeSessionId, codeIntelActive, saveFile, settings, tabs, updateTab, workspace?.rootPath]);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s" && selectedPath) { event.preventDefault(); void save(selectedPath); } };
@@ -363,7 +560,10 @@ export default function Editor({ treeOnly = false }: { treeOnly?: boolean } = {}
     }
     setTabs((current) => { const next = { ...current }; delete next[path]; return next; });
     if (selectedPath === path) setSelectedPath(Object.keys(tabs).find((key) => key !== path) ?? null);
-  }, [activeSessionId, saveFile, selectedPath, tabs]);
+    forgetFile(path);
+    scopeSpansRef.current.delete(path);
+    if (codeIntelActive && workspace?.rootPath) void wailsClient.codeIntelForgetFile(workspace.rootPath, path);
+  }, [activeSessionId, codeIntelActive, saveFile, selectedPath, tabs, workspace?.rootPath]);
 
   const tabList = useMemo(() => Object.values(tabs), [tabs]);
   const showContextMenu = (event: React.MouseEvent, node: FileNode) => {
@@ -440,7 +640,7 @@ export default function Editor({ treeOnly = false }: { treeOnly?: boolean } = {}
         <div className="editor-pane__meta"><span>{activeTab.path}</span><span>{activeTab.saving ? "Saving…" : activeTab.dirty ? "Unsaved" : "Saved"}</span></div>
         <MonacoEditor
           height="100%" language={languageFor(activeTab.path)} value={activeTab.content} theme={settings.theme === "light" ? "vs" : "vs-dark"}
-          onMount={(editor) => { editorRef.current = editor; gutterDecorationIds.current = editor.deltaDecorations([], gutterDiff ? gutterDecorations(gutterDiff.original, gutterDiff.modified) : []); tryReveal(); }}
+          onMount={(editor, monaco) => { editorRef.current = editor; monacoNsRef.current = monaco; registerCodeIntelListeners(editor); gutterDecorationIds.current = editor.deltaDecorations([], gutterDiff ? gutterDecorations(gutterDiff.original, gutterDiff.modified) : []); tryReveal(); }}
           onChange={(value) => updateTab(activeTab.path, { content: value ?? "", dirty: (value ?? "") !== activeTab.savedContent, preview: false })}
           options={{ minimap: { enabled: settings.editorMinimap }, fontFamily: "Cascadia Code, Consolas, 'SFMono-Regular', monospace", fontSize: settings.editorFontSize, tabSize: settings.editorTabSize, lineNumbers: settings.editorLineNumbers ? "on" : "off", padding: { top: 12 }, smoothScrolling: true, scrollBeyondLastLine: false, renderWhitespace: "selection", wordWrap: settings.editorWordWrap, automaticLayout: true }}
         />

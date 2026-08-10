@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 packages = [
   "core", "agents", "tools", "providers", "memory",
   "coordination", "observability", "cli", "api", "configs", "indexer",
+  "mcp_server",
 ]
 
 [project]
@@ -39,6 +40,7 @@ dependencies = [
   "python-multipart>=0.0.9",
   "websockets>=12.0",
   "aiofiles>=23.2",
+  "mcp>=1.2.0",
 ]
 
 [project.optional-dependencies]

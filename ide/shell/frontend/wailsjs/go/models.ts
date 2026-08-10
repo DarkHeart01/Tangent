@@ -1,3 +1,186 @@
+export namespace codeintel {
+	
+	export class Span {
+	    start_line: number;
+	    start_col: number;
+	    end_line: number;
+	    end_col: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new Span(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.start_line = source["start_line"];
+	        this.start_col = source["start_col"];
+	        this.end_line = source["end_line"];
+	        this.end_col = source["end_col"];
+	    }
+	}
+	export class Edge {
+	    id: string;
+	    from: string;
+	    to?: string;
+	    to_name: string;
+	    kind: string;
+	    cross_language: boolean;
+	    confidence: number;
+	    bridge_adapter?: string;
+	    resolution_state: string;
+	    file_path: string;
+	    span: Span;
+	    message?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Edge(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.from = source["from"];
+	        this.to = source["to"];
+	        this.to_name = source["to_name"];
+	        this.kind = source["kind"];
+	        this.cross_language = source["cross_language"];
+	        this.confidence = source["confidence"];
+	        this.bridge_adapter = source["bridge_adapter"];
+	        this.resolution_state = source["resolution_state"];
+	        this.file_path = source["file_path"];
+	        this.span = this.convertValues(source["span"], Span);
+	        this.message = source["message"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class Signature {
+	    name: string;
+	    detail: string;
+	    return_type: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Signature(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.detail = source["detail"];
+	        this.return_type = source["return_type"];
+	    }
+	}
+	export class Node {
+	    id: string;
+	    kind: string;
+	    language: string;
+	    file_path: string;
+	    span: Span;
+	    signature?: Signature;
+	    tier: string;
+	    resolution_state: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Node(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.kind = source["kind"];
+	        this.language = source["language"];
+	        this.file_path = source["file_path"];
+	        this.span = this.convertValues(source["span"], Span);
+	        this.signature = this.convertValues(source["signature"], Signature);
+	        this.tier = source["tier"];
+	        this.resolution_state = source["resolution_state"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	
+	export class SuggestedFile {
+	    path: string;
+	    proposed_content: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SuggestedFile(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.proposed_content = source["proposed_content"];
+	    }
+	}
+	export class Suggestion {
+	    explanation: string;
+	    files: SuggestedFile[];
+	
+	    static createFrom(source: any = {}) {
+	        return new Suggestion(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.explanation = source["explanation"];
+	        this.files = this.convertValues(source["files"], SuggestedFile);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+
+}
+
 export namespace main {
 	
 	export class ArtifactEntry {

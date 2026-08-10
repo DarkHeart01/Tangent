@@ -8,6 +8,7 @@ import (
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
+	"shell/internal/codeintel"
 	"shell/internal/session"
 	"shell/internal/workspace"
 	"shell/internal/wsserver"
@@ -22,6 +23,7 @@ type SessionAPI struct {
 	manager   *session.Manager
 	ws        *wsserver.Server
 	terminals *TerminalManager
+	codeintel *codeintel.Engine
 }
 
 func NewSessionAPI() *SessionAPI {
@@ -65,6 +67,9 @@ func (s *SessionAPI) shutdown(ctx context.Context) {
 	appendLog("[shutdown] Tangent IDE backend stopping")
 	if s.terminals != nil {
 		s.terminals.CloseAll()
+	}
+	if s.codeintel != nil {
+		s.codeintel.Close()
 	}
 	// Stop every running container-mode session first (kills swarm
 	// subprocesses, removes containers) so a graceful app close never

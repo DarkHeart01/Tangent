@@ -1,7 +1,8 @@
 // Thin, typed wrapper over the generated Wails bindings so components never
 // import straight from ../../wailsjs/go/*.
 import * as SessionAPI from "../../wailsjs/go/main/SessionAPI";
-import { main, session } from "../../wailsjs/go/models";
+import { main, session, codeintel } from "../../wailsjs/go/models";
+import type { CINode, CIEdge } from "./codeintel/treeSitter";
 
 /** True when the page is hosted inside the Wails desktop WebView. */
 export const isWailsDesktop = (): boolean =>
@@ -110,3 +111,46 @@ export const createTerminal = (root: string, cols: number, rows: number): Promis
 export const writeTerminal = (id: string, data: string): Promise<void> => SessionAPI.WriteTerminal(id, data);
 export const resizeTerminal = (id: string, cols: number, rows: number): Promise<void> => SessionAPI.ResizeTerminal(id, cols, rows);
 export const closeTerminal = (id: string): Promise<void> => SessionAPI.CloseTerminal(id);
+
+// Live Code Intelligence Engine (ide/shell/internal/codeintel). Node/Edge
+// arrays are built as plain objects matching codeintel.Node/Edge's JSON
+// shape (see frontend/src/lib/codeintel/treeSitter.ts) rather than real
+// class instances -- Wails only serializes these to JSON on the way over the
+// bridge, so the generated class's convertValues method is never needed on
+// the outbound side, only the inbound (return-value) side.
+export type CodeIntelSpan = codeintel.Span;
+export type CodeIntelSuggestion = codeintel.Suggestion;
+
+export const codeIntelSetEnabled = (enabled: boolean, root: string): Promise<void> =>
+  SessionAPI.CodeIntelSetEnabled(enabled, root);
+export const codeIntelUpdateFile = (
+  root: string,
+  path: string,
+  content: string,
+  nodes: CINode[],
+  edges: CIEdge[],
+  syntaxValid: boolean,
+  cursorLine: number,
+): Promise<void> =>
+  SessionAPI.CodeIntelUpdateFile(root, path, content, nodes as unknown as codeintel.Node[], edges as unknown as codeintel.Edge[], syntaxValid, cursorLine);
+export const codeIntelSignalScopeExit = (root: string, path: string, scopeSpan: CINode["span"]): Promise<void> =>
+  SessionAPI.CodeIntelSignalScopeExit(root, path, scopeSpan as unknown as codeintel.Span);
+export const codeIntelArmIdleFallback = (root: string, path: string, scopeSpan: CINode["span"]): Promise<void> =>
+  SessionAPI.CodeIntelArmIdleFallback(root, path, scopeSpan as unknown as codeintel.Span);
+export const codeIntelAcceptSuggestion = (id: string): Promise<CodeIntelSuggestion> => SessionAPI.CodeIntelAcceptSuggestion(id);
+export const codeIntelRejectSuggestion = (id: string): Promise<void> => SessionAPI.CodeIntelRejectSuggestion(id);
+export const codeIntelSetFocus = (root: string, path: string, focused: boolean): Promise<void> =>
+  SessionAPI.CodeIntelSetFocus(root, path, focused);
+export const codeIntelForgetFile = (root: string, path: string): Promise<void> => SessionAPI.CodeIntelForgetFile(root, path);
+export const codeIntelSetPythonEnabled = (enabled: boolean): Promise<void> => SessionAPI.CodeIntelSetPythonEnabled(enabled);
+
+// Level 1's real inline ghost-text completion (like GitHub Copilot/Cursor) --
+// see frontend/src/lib/codeintel/inlineCompletion.ts for the Monaco provider
+// that calls this per keystroke.
+export const codeIntelCompleteInline = (root: string, path: string, prefix: string, suffix: string): Promise<string> =>
+  SessionAPI.CodeIntelCompleteInline(root, path, prefix, suffix);
+
+// Three-level proactive suggestion system additions.
+export const codeIntelSetLevel = (level: 1 | 2 | 3): Promise<void> => SessionAPI.CodeIntelSetLevel(level);
+export const codeIntelFileSaved = (root: string, path: string): Promise<void> => SessionAPI.CodeIntelFileSaved(root, path);
+export const codeIntelScanProject = (root: string): Promise<void> => SessionAPI.CodeIntelScanProject(root);

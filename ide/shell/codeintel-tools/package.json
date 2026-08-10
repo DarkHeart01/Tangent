@@ -1,0 +1,9 @@
+{
+  "name": "codeintel-tools",
+  "private": true,
+  "description": "Language servers bundled for the Live Code Intelligence Engine, pinned here independent of whatever the user's opened project has installed -- see ide/shell/internal/codeintel/tsserver_adapter.go's FindTypescriptLanguageServer.",
+  "dependencies": {
+    "typescript": "^5.6.3",
+    "typescript-language-server": "^4.3.3"
+  }
+}
