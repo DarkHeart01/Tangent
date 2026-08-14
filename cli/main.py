@@ -23,6 +23,7 @@ import asyncio
 import json
 import os
 import sys
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
 from typing import Any, Optional
 
@@ -234,8 +235,22 @@ def _build_code_index_components(cfg, provider_registry):
 
 # ── Main group ────────────────────────────────────────────────────────────────
 
+def _swarm_version() -> str:
+    """Read the installed package version rather than hardcoding it, so
+    `swarm --version` reflects whatever was actually `uv tool install`'d —
+    including the daemon-side MinSwarmVersion compatibility check
+    (pyengine.go), which parses this same string. Falls back to a
+    dev-checkout marker when there's no installed-package metadata to read
+    (e.g. `python -m cli.main` run straight from a checkout with no `pip
+    install -e .`/`uv tool install` ever done)."""
+    try:
+        return _pkg_version("swarm")
+    except PackageNotFoundError:
+        return "0.0.0+dev"
+
+
 @click.group()
-@click.version_option("0.1.0", prog_name="swarm")
+@click.version_option(_swarm_version(), prog_name="swarm")
 def cli() -> None:
     """Swarm — a general-purpose, extensible LLM agent swarm. Supports Groq and OpenRouter."""
 
