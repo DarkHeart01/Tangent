@@ -1,9 +1,18 @@
-// Package execapi is the HTTP surface the real Python swarm process calls
+// Package execapi is the gRPC surface the real Python swarm process calls
 // back into, to run shell_exec inside the session's sandboxed container and
 // to read/write files in the session's worktree — the daemon-routing path
-// tools/shell_exec and tools/filesystem fall into when TANGENT_DAEMON_URL
-// is set. Bound to 127.0.0.1 only; every request needs a per-session bearer
-// token minted at StartSession time.
+// tools/shell_exec and tools/filesystem fall into when
+// TANGENT_DAEMON_GRPC_TARGET is set. Bound to 127.0.0.1 only; every call
+// needs a per-session bearer token (see grpc.go's authInterceptor).
+//
+// Previously an HTTP surface (POST /sessions/{id}/exec, GET|PUT
+// /sessions/{id}/fs, POST /sessions/{id}/gate) — retired once the Python
+// side was fully swapped to the gRPC services in grpc.go and real
+// verification passed (see the gRPC-execapi-migration task this shipped
+// with). The business logic below (runExec/readFile/writeFile/
+// requestGate in gate.go) is unchanged from that HTTP version; only the
+// transport and auth (grpc.go's metadata-based authInterceptor, replacing
+// authenticate's URL-path-segment + header check) are new.
 //
 // Deliberately has zero dependency on the session package (which owns
 // *Server) or internal/workspace (which imports session for its
@@ -13,19 +22,19 @@
 package execapi
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net"
-	"net/http"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"google.golang.org/grpc"
 
 	"shell/internal/docker"
 )
@@ -51,9 +60,9 @@ type Server struct {
 	gateStore   *gateStore
 	gateTimeout time.Duration
 
-	port     int
-	listener net.Listener
-	httpSrv  *http.Server
+	grpcPort     int
+	grpcListener net.Listener
+	grpcSrv      *grpc.Server
 }
 
 func New(dm *docker.DockerManager, emit EmitFunc) *Server {
@@ -94,75 +103,14 @@ func (s *Server) lookup(sessionID string) (SessionInfo, bool) {
 	return info, ok
 }
 
-func (s *Server) Start() (int, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
-	}
-	s.listener = ln
-	s.port = ln.Addr().(*net.TCPAddr).Port
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /sessions/{session_id}/exec", s.handleExec)
-	mux.HandleFunc("GET /sessions/{session_id}/fs", s.handleFSGet)
-	mux.HandleFunc("PUT /sessions/{session_id}/fs", s.handleFSPut)
-	mux.HandleFunc("POST /sessions/{session_id}/gate", s.handleGate)
-	s.httpSrv = &http.Server{Handler: mux}
-
-	go func() {
-		_ = s.httpSrv.Serve(ln)
-	}()
-
-	return s.port, nil
-}
-
+// Stop tears down the gRPC listener — session.Manager.Shutdown and
+// containerExecutor's error paths already call Stop() once per Server.
 func (s *Server) Stop() error {
-	if s.httpSrv == nil {
-		return nil
-	}
-	return s.httpSrv.Close()
-}
-
-// BaseURL is what gets handed to the swarm subprocess as TANGENT_DAEMON_URL.
-func (s *Server) BaseURL() string {
-	return fmt.Sprintf("http://127.0.0.1:%d", s.port)
-}
-
-// authenticate resolves session_id from the URL, checks the bearer token
-// against that session's registered token, and writes the error response
-// itself on failure.
-func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (SessionInfo, string, bool) {
-	sessionID := r.PathValue("session_id")
-	info, ok := s.lookup(sessionID)
-	if !ok {
-		http.Error(w, "unknown session", http.StatusNotFound)
-		return SessionInfo{}, "", false
-	}
-	token, found := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !found || token != info.Token {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return SessionInfo{}, "", false
-	}
-	return info, sessionID, true
+	s.StopGRPC()
+	return nil
 }
 
 // ── exec ─────────────────────────────────────────────────────────────────
-
-// Field names deliberately match tools/shell_exec/handler.py's actual
-// inputs (command: str, working_dir: str) and return dict (stdout, stderr,
-// returncode) — not the illustrative cmd:[]string/exit_code shape — so the
-// Python side can pass its `inputs` through with minimal translation.
-type execRequest struct {
-	Command        string  `json:"command"`
-	WorkingDir     string  `json:"working_dir"`
-	TimeoutSeconds float64 `json:"timeout_seconds"`
-}
-
-type execResponse struct {
-	Stdout     string `json:"stdout"`
-	Stderr     string `json:"stderr"`
-	ReturnCode int    `json:"returncode"`
-}
 
 // Mirrors session.ToolCall/session.ToolResult's JSON shape exactly.
 type toolCallPayload struct {
@@ -202,45 +150,54 @@ func emitLines(emit EmitFunc, sessionID, containerID, stream, data string) {
 	}
 }
 
-func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
-	info, sessionID, ok := s.authenticate(w, r)
-	if !ok {
-		return
-	}
+// execResult is what the gRPC Exec.Run service (grpc.go) projects onto
+// pb.ExecResponse.
+type execResult struct {
+	Stdout     string
+	Stderr     string
+	ReturnCode int
+}
 
-	var req execRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
-		return
-	}
-	if req.Command == "" {
-		http.Error(w, "command is required", http.StatusBadRequest)
-		return
-	}
-	timeout := time.Duration(req.TimeoutSeconds * float64(time.Second))
-	if timeout <= 0 {
-		timeout = 30 * time.Second
-	}
+// validationError marks a caller-input problem (bad command, working_dir
+// escape) as distinct from an execution failure — grpc.go maps it to
+// InvalidArgument vs Internal.
+type validationError struct{ msg string }
 
-	containerCwd, err := resolveContainerPath(req.WorkingDir)
+func (e *validationError) Error() string { return e.msg }
+
+// runExec is the Exec.Run service's actual logic (grpc.go's Run method
+// calls this directly) — container-path jail, then the
+// tool.call/terminal.output/tool.result event sequence around the real
+// docker exec.
+//
+// explicitTimeout is 0 in every caller today (pb.ExecRequest has no
+// timeout_seconds field by design — see execapi.proto); kept as a
+// parameter rather than folded into execTimeout's ctx-only lookup so a
+// future non-gRPC caller isn't forced through a context deadline to get a
+// custom timeout.
+func (s *Server) runExec(ctx context.Context, sessionID string, info SessionInfo, command, workingDir string, explicitTimeout time.Duration) (execResult, error) {
+	if command == "" {
+		return execResult{}, &validationError{"command is required"}
+	}
+	timeout := s.execTimeout(ctx, explicitTimeout)
+
+	containerCwd, err := resolveContainerPath(workingDir)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+		return execResult{}, &validationError{err.Error()}
 	}
 
 	callID := newID()
 	s.emit(sessionID, "tool.call", toolCallPayload{
 		ToolName: "shell_exec", SideEffectTier: "mutates-local",
-		ArgsSummary: truncate(req.Command, 200), CallID: callID,
+		ArgsSummary: truncate(command, 200), CallID: callID,
 	})
 
 	exitCode, stdout, stderr, err := s.docker.ExecInContainer(
-		r.Context(), info.ContainerID, []string{"sh", "-c", req.Command}, containerCwd, timeout,
+		ctx, info.ContainerID, []string{"sh", "-c", command}, containerCwd, timeout,
 	)
 	if err != nil {
 		s.emit(sessionID, "tool.result", toolResultPayload{CallID: callID, Status: "error", Summary: err.Error()})
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return execResult{}, err
 	}
 
 	// The Terminal panel's pipeline (Step 4) is driven by terminal.output —
@@ -249,15 +206,31 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	emitLines(s.emit, sessionID, info.ContainerID, "stdout", stdout)
 	emitLines(s.emit, sessionID, info.ContainerID, "stderr", stderr)
 
-	status := "ok"
+	resultStatus := "ok"
 	if exitCode != 0 {
-		status = "error"
+		resultStatus = "error"
 	}
 	s.emit(sessionID, "tool.result", toolResultPayload{
-		CallID: callID, Status: status, Summary: fmt.Sprintf("exit code %d", exitCode),
+		CallID: callID, Status: resultStatus, Summary: fmt.Sprintf("exit code %d", exitCode),
 	})
 
-	writeJSON(w, http.StatusOK, execResponse{Stdout: stdout, Stderr: stderr, ReturnCode: exitCode})
+	return execResult{Stdout: stdout, Stderr: stderr, ReturnCode: exitCode}, nil
+}
+
+// execTimeout: an explicit override wins if given; otherwise derive it
+// from the calling context's own deadline — grpc's native per-call
+// deadline, propagated from the Python client's RPC timeout rather than
+// trusted from a message field; otherwise 30s.
+func (s *Server) execTimeout(ctx context.Context, explicit time.Duration) time.Duration {
+	if explicit > 0 {
+		return explicit
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining > 0 {
+			return remaining
+		}
+	}
+	return 30 * time.Second
 }
 
 // resolveContainerPath validates working_dir (as given by the swarm
@@ -278,16 +251,18 @@ func resolveContainerPath(workingDir string) (string, error) {
 
 // ── filesystem ───────────────────────────────────────────────────────────
 
-func (s *Server) handleFSGet(w http.ResponseWriter, r *http.Request) {
-	info, sessionID, ok := s.authenticate(w, r)
-	if !ok {
-		return
-	}
-	relPath := r.URL.Query().Get("path")
+// notFoundError distinguishes "file doesn't exist" (grpc.go maps it to
+// codes.NotFound) from other read failures (codes.Internal).
+type notFoundError struct{ msg string }
+
+func (e *notFoundError) Error() string { return e.msg }
+
+// readFile is the Filesystem.Read service's actual logic (grpc.go's Read
+// method calls this directly).
+func (s *Server) readFile(sessionID string, info SessionInfo, relPath string) ([]byte, error) {
 	full, err := resolveHostPath(info.WorktreePath, relPath)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+		return nil, &validationError{err.Error()}
 	}
 
 	callID := newID()
@@ -300,38 +275,23 @@ func (s *Server) handleFSGet(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			s.emit(sessionID, "tool.result", toolResultPayload{CallID: callID, Status: "error", Summary: "not found"})
-			http.Error(w, "not found", http.StatusNotFound)
-			return
+			return nil, &notFoundError{"not found"}
 		}
 		s.emit(sessionID, "tool.result", toolResultPayload{CallID: callID, Status: "error", Summary: err.Error()})
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return nil, err
 	}
 	s.emit(sessionID, "tool.result", toolResultPayload{
 		CallID: callID, Status: "ok", Summary: fmt.Sprintf("%d bytes", len(data)),
 	})
-
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(data)
+	return data, nil
 }
 
-func (s *Server) handleFSPut(w http.ResponseWriter, r *http.Request) {
-	info, sessionID, ok := s.authenticate(w, r)
-	if !ok {
-		return
-	}
-	relPath := r.URL.Query().Get("path")
+// writeFile is the Filesystem.Write service's actual logic (grpc.go's
+// Write method calls this directly).
+func (s *Server) writeFile(sessionID string, info SessionInfo, relPath string, body []byte) (int, error) {
 	full, err := resolveHostPath(info.WorktreePath, relPath)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "failed to read body", http.StatusBadRequest)
-		return
+		return 0, &validationError{err.Error()}
 	}
 
 	callID := newID()
@@ -342,21 +302,18 @@ func (s *Server) handleFSPut(w http.ResponseWriter, r *http.Request) {
 
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		s.emit(sessionID, "tool.result", toolResultPayload{CallID: callID, Status: "error", Summary: err.Error()})
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return 0, err
 	}
 	if err := os.WriteFile(full, body, 0o644); err != nil {
 		s.emit(sessionID, "tool.result", toolResultPayload{CallID: callID, Status: "error", Summary: err.Error()})
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return 0, err
 	}
 	// file.changed is left to the existing fsnotify watcher on worktreePath
 	// (Step 4) — emitting it here too would double-fire.
 	s.emit(sessionID, "tool.result", toolResultPayload{
 		CallID: callID, Status: "ok", Summary: fmt.Sprintf("%d bytes", len(body)),
 	})
-
-	writeJSON(w, http.StatusOK, map[string]int{"bytes_written": len(body)})
+	return len(body), nil
 }
 
 // resolveHostPath is the same defense-in-depth check as
@@ -380,12 +337,6 @@ func resolveHostPath(worktreePath, relPath string) (string, error) {
 		return "", fmt.Errorf("path %q escapes worktree", relPath)
 	}
 	return fullAbs, nil
-}
-
-func writeJSON(w http.ResponseWriter, status int, v interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
 }
 
 func newID() string {

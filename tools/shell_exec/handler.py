@@ -7,9 +7,7 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-from core.daemon_client import DAEMON_TOKEN as _DAEMON_TOKEN
-from core.daemon_client import DAEMON_URL as _DAEMON_URL
-from core.daemon_client import SESSION_ID as _SESSION_ID
+from core.daemon_client import DAEMON_GRPC_TARGET as _DAEMON_GRPC_TARGET
 from core.exceptions import SafetyError
 from tools.base import ToolHandler
 
@@ -50,7 +48,7 @@ class ShellExecHandler(ToolHandler):
         # either/or with the container sandbox the daemon branch runs
         # inside (see hardening.go: cap-drop, read-only rootfs, non-root,
         # no network, no docker.sock).
-        if _DAEMON_URL:
+        if _DAEMON_GRPC_TARGET:
             return await self._run_via_daemon(command, working_dir, timeout)
 
         # Jail working directory
@@ -79,27 +77,36 @@ class ShellExecHandler(ToolHandler):
 
     async def _run_via_daemon(self, command: str, working_dir: str, timeout: float) -> dict[str, Any]:
         """Runs the command inside the session's sandboxed container via the
-        Go daemon's execapi, instead of on the host. The working_dir jail
-        above is skipped here on purpose — that check computes an absolute
-        HOST path, but working_dir means something relative to /workspace
-        *inside the container* in this branch; comparing it against _CWD
-        would be checking the wrong root entirely. The daemon independently
-        resolves and jails working_dir against /workspace on its side
-        (ide/shell/internal/execapi/server.go's resolveContainerPath).
+        Go daemon's execapi gRPC service, instead of on the host. The
+        working_dir jail above is skipped here on purpose — that check
+        computes an absolute HOST path, but working_dir means something
+        relative to /workspace *inside the container* in this branch;
+        comparing it against _CWD would be checking the wrong root
+        entirely. The daemon independently resolves and jails working_dir
+        against /workspace on its side (ide/shell/internal/execapi/
+        server.go's resolveContainerPath, shared by both the HTTP and gRPC
+        paths).
+
+        No timeout_seconds field on the request — the RPC's own deadline
+        (set below) IS the timeout, propagated natively by grpc rather than
+        trusted from a message field the server would have to re-derive a
+        wait duration from.
         """
-        import httpx
+        import grpc
+
+        from core import daemon_client
+        from core.execapi_grpc.execapi.v1 import execapi_pb2, execapi_pb2_grpc
 
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    f"{_DAEMON_URL}/sessions/{_SESSION_ID}/exec",
-                    json={"command": command, "working_dir": working_dir, "timeout_seconds": timeout},
-                    headers={"Authorization": f"Bearer {_DAEMON_TOKEN}"},
+            async with daemon_client.grpc_channel() as channel:
+                stub = execapi_pb2_grpc.ExecStub(channel)
+                resp = await stub.Run(
+                    execapi_pb2.ExecRequest(command=command, working_dir=working_dir),
+                    metadata=daemon_client.grpc_metadata(),
                     timeout=timeout + 10,
                 )
-            resp.raise_for_status()
-            return resp.json()
-        except httpx.HTTPError as exc:
+            return {"stdout": resp.stdout, "stderr": resp.stderr, "returncode": resp.returncode}
+        except grpc.RpcError as exc:
             return {"stdout": "", "stderr": f"daemon exec failed: {exc}", "returncode": -1}
 
     async def self_test(self) -> bool:

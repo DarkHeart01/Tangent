@@ -270,8 +270,8 @@ func (m *Manager) containerExecutor() (*ContainerExecutor, error) {
 	}
 
 	execServer := execapi.New(dm, m.emitToSession)
-	if _, err := execServer.Start(); err != nil {
-		return nil, fmt.Errorf("start execapi server: %w", err)
+	if _, err := execServer.StartGRPC(); err != nil {
+		return nil, fmt.Errorf("start execapi grpc server: %w", err)
 	}
 
 	m.docker = dm

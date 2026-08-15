@@ -5,9 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
-from core.daemon_client import DAEMON_TOKEN as _DAEMON_TOKEN
-from core.daemon_client import DAEMON_URL as _DAEMON_URL
-from core.daemon_client import SESSION_ID as _SESSION_ID
+from core.daemon_client import DAEMON_GRPC_TARGET as _DAEMON_GRPC_TARGET
 from core.exceptions import SafetyError
 from observability.logutil import get_logger
 from tools.base import ToolHandler
@@ -119,7 +117,7 @@ class FilesystemHandler(ToolHandler):
             path = _safe_path(raw_path)
 
         if op == "read":
-            if _DAEMON_URL:
+            if _DAEMON_GRPC_TARGET:
                 return await self._read_via_daemon(path)
             if not path.exists():
                 return {"error": f"File not found: {path}"}
@@ -127,7 +125,7 @@ class FilesystemHandler(ToolHandler):
                     "path": str(path.relative_to(_CWD))}
 
         elif op == "write":
-            if _DAEMON_URL:
+            if _DAEMON_GRPC_TARGET:
                 return await self._write_via_daemon(path, inputs.get("content", ""))
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(inputs.get("content", ""), encoding="utf-8")
@@ -217,50 +215,53 @@ class FilesystemHandler(ToolHandler):
         return {"error": f"Unknown operation: {op}"}
 
     async def _read_via_daemon(self, path: Path) -> dict[str, Any]:
-        """Reads via the Go daemon's execapi instead of directly off disk.
-        Functionally equivalent either way — this process already has
-        direct host access to the same bind-mounted worktree the daemon
-        operates on — done for Dashboard tool-call visibility. path is
-        already resolved+jailed by _safe_path above; the daemon applies its
-        own independent path-jail check on top (defense in depth, not a
-        replacement for the check already done here).
+        """Reads via the Go daemon's execapi gRPC service instead of
+        directly off disk. Functionally equivalent either way — this
+        process already has direct host access to the same bind-mounted
+        worktree the daemon operates on — done for Dashboard tool-call
+        visibility. path is already resolved+jailed by _safe_path above;
+        the daemon applies its own independent path-jail check on top
+        (defense in depth, not a replacement for the check already done
+        here).
         """
-        import httpx
+        import grpc
+
+        from core import daemon_client
+        from core.execapi_grpc.execapi.v1 import execapi_pb2, execapi_pb2_grpc
 
         rel = str(path.relative_to(_CWD)).replace("\\", "/")
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    f"{_DAEMON_URL}/sessions/{_SESSION_ID}/fs",
-                    params={"path": rel},
-                    headers={"Authorization": f"Bearer {_DAEMON_TOKEN}"},
+            async with daemon_client.grpc_channel() as channel:
+                stub = execapi_pb2_grpc.FilesystemStub(channel)
+                resp = await stub.Read(
+                    execapi_pb2.FileReadRequest(path=rel),
+                    metadata=daemon_client.grpc_metadata(),
                     timeout=15,
                 )
-            if resp.status_code == 404:
-                return {"error": f"File not found: {path}"}
-            resp.raise_for_status()
             return {"content": resp.content.decode("utf-8", errors="replace"), "path": rel}
-        except httpx.HTTPError as exc:
+        except grpc.RpcError as exc:
+            if exc.code() == grpc.StatusCode.NOT_FOUND:
+                return {"error": f"File not found: {path}"}
             return {"error": f"daemon read failed: {exc}"}
 
     async def _write_via_daemon(self, path: Path, content: str) -> dict[str, Any]:
-        import httpx
+        import grpc
+
+        from core import daemon_client
+        from core.execapi_grpc.execapi.v1 import execapi_pb2, execapi_pb2_grpc
 
         rel = str(path.relative_to(_CWD)).replace("\\", "/")
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.put(
-                    f"{_DAEMON_URL}/sessions/{_SESSION_ID}/fs",
-                    params={"path": rel},
-                    content=content.encode("utf-8"),
-                    headers={"Authorization": f"Bearer {_DAEMON_TOKEN}"},
+            async with daemon_client.grpc_channel() as channel:
+                stub = execapi_pb2_grpc.FilesystemStub(channel)
+                resp = await stub.Write(
+                    execapi_pb2.FileWriteRequest(path=rel, content=content.encode("utf-8")),
+                    metadata=daemon_client.grpc_metadata(),
                     timeout=15,
                 )
-            resp.raise_for_status()
-            data = resp.json()
             await _mirror_write(path)  # same artifact-sink hook the local write path calls
-            return {"written": rel, "bytes": data.get("bytes_written", len(content))}
-        except httpx.HTTPError as exc:
+            return {"written": rel, "bytes": resp.bytes_written}
+        except grpc.RpcError as exc:
             return {"error": f"daemon write failed: {exc}"}
 
     async def self_test(self) -> bool:

@@ -132,7 +132,7 @@ func parseVersionParts(v string) ([]int, error) {
 // a stdin confirmation prompt (coordination/safety.py's
 // confirm_tool_call), and this subprocess has no attached terminal to
 // answer it.
-func LaunchSwarmProcess(sessionID, goal, topology, repoRoot, worktreePath, traceDir, daemonURL, daemonToken string) (*exec.Cmd, error) {
+func LaunchSwarmProcess(sessionID, goal, topology, repoRoot, worktreePath, traceDir, daemonGRPCTarget, daemonToken string) (*exec.Cmd, error) {
 	if goal == "" {
 		return nil, fmt.Errorf("goal must not be empty")
 	}
@@ -158,7 +158,7 @@ func LaunchSwarmProcess(sessionID, goal, topology, repoRoot, worktreePath, trace
 	cmd.Dir = repoRoot
 	cmd.Env = append(os.Environ(),
 		"TANGENT_SESSION_ID="+sessionID,
-		"TANGENT_DAEMON_URL="+daemonURL,
+		"TANGENT_DAEMON_GRPC_TARGET="+daemonGRPCTarget,
 		"TANGENT_DAEMON_TOKEN="+daemonToken,
 	)
 

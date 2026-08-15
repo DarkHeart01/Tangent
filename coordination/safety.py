@@ -130,7 +130,7 @@ async def confirm_tool_call(
     if mode == "auto":
         return True
 
-    if daemon_client.DAEMON_URL:
+    if daemon_client.DAEMON_GRPC_TARGET:
         return await _daemon_confirm_tool_call(tool_name, side_effect_level, inputs)
 
     from rich.console import Console
@@ -156,28 +156,34 @@ async def _daemon_confirm_tool_call(
 ) -> bool:
     """Daemon-aware counterpart to the rich.Prompt confirmation above —
     mirrors coordination/orchestrator.py's _daemon_gate_request exactly,
-    routing through the same POST /sessions/{id}/gate primitive with
-    kind: "tool_call" instead of kind: "phase".
+    routing through the same Gate.Request RPC with kind=GATE_KIND_TOOL_CALL
+    instead of GATE_KIND_PHASE.
+
+    No client-side timeout picked "comfortably over" the server's own
+    default anymore — the 650s below is the RPC's real deadline, which the
+    Go side reads back via ctx.Deadline() (see gate.go's
+    gateWaitTimeout) to decide its own wait, rather than the two sides each
+    trusting a separately-chosen number to stay in sync.
     """
-    import httpx
+    from core.execapi_grpc.execapi.v1 import execapi_pb2, execapi_pb2_grpc
 
     args_summary = str(inputs)
     if len(args_summary) > 200:
         args_summary = args_summary[:200] + "…"
 
-    async with httpx.AsyncClient(timeout=650) as client:
-        resp = await client.post(
-            f"{daemon_client.DAEMON_URL}/sessions/{daemon_client.SESSION_ID}/gate",
-            json={
-                "kind": "tool_call",
-                "tool_name": tool_name,
-                "side_effect_tier": side_effect_level,
-                "args_summary": args_summary,
-            },
-            headers={"Authorization": f"Bearer {daemon_client.DAEMON_TOKEN}"},
+    async with daemon_client.grpc_channel() as channel:
+        stub = execapi_pb2_grpc.GateStub(channel)
+        resp = await stub.Request(
+            execapi_pb2.GateRequest(
+                kind=execapi_pb2.GATE_KIND_TOOL_CALL,
+                tool_name=tool_name,
+                side_effect_tier=side_effect_level,
+                args_summary=args_summary,
+            ),
+            metadata=daemon_client.grpc_metadata(),
+            timeout=650,
         )
-    resp.raise_for_status()
-    return resp.json()["approved"]
+    return resp.approved
 
 
 # ── Unified safety gate ───────────────────────────────────────────────────────

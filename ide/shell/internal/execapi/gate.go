@@ -1,9 +1,8 @@
 package execapi
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
-	"net/http"
 	"sync"
 	"time"
 )
@@ -13,29 +12,24 @@ import (
 // is reading a phase diff or thinking about whether to approve a deploy.
 const defaultGateTimeout = 10 * time.Minute
 
-// gateRequest is the wire shape for every kind this endpoint serves: a
-// lifecycle phase-transition gate (coordination/orchestrator.py's
-// on_gate_request), a mutates-external tool-call confirmation
-// (coordination/safety.py's confirm_tool_call), and a human_input question
+// gateRequest is the internal shape every gate kind maps onto: a lifecycle
+// phase-transition gate (coordination/orchestrator.py's on_gate_request), a
+// mutates-external tool-call confirmation (coordination/safety.py's
+// confirm_tool_call), and a human_input question
 // (coordination/orchestrator.py's _daemon_ws_requester, registered as
-// tools/human_input/handler.py's _ws_requester). Only the fields relevant
-// to the given Kind need be set.
+// tools/human_input/handler.py's _ws_requester) — all three arrive as one
+// Gate.Request RPC (grpc.go), which builds this struct from the incoming
+// pb.GateRequest before calling requestGate below. Only the fields
+// relevant to the given Kind need be set.
 type gateRequest struct {
-	Kind           string   `json:"kind"` // "phase" | "tool_call" | "question"
-	PhaseID        string   `json:"phase_id,omitempty"`
-	PhaseName      string   `json:"phase_name,omitempty"`
-	ToolName       string   `json:"tool_name,omitempty"`
-	SideEffectTier string   `json:"side_effect_tier,omitempty"`
-	ArgsSummary    string   `json:"args_summary,omitempty"`
-	Prompt         string   `json:"prompt,omitempty"`
-	Options        []string `json:"options,omitempty"`
-	TimeoutSeconds float64  `json:"timeout_seconds,omitempty"`
-}
-
-// Used for "phase"/"tool_call" kinds. "question" kind writes
-// {"response": "..."} directly instead — see handleGate.
-type gateResponse struct {
-	Approved bool `json:"approved"`
+	Kind           string // "phase" | "tool_call" | "question"
+	PhaseID        string
+	PhaseName      string
+	ToolName       string
+	SideEffectTier string
+	ArgsSummary    string
+	Prompt         string
+	Options        []string
 }
 
 // Mirrors session.HumanGatePending's JSON shape. side_effect_tier is
@@ -112,18 +106,16 @@ func (s *Server) ResolveGate(gateID, decision, note string) bool {
 	return s.gateStore.resolve(gateID, decision, note)
 }
 
-func (s *Server) handleGate(w http.ResponseWriter, r *http.Request) {
-	_, sessionID, ok := s.authenticate(w, r)
-	if !ok {
-		return
-	}
-
-	var req gateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
-		return
-	}
-
+// requestGate is the Gate.Request service's actual logic (grpc.go's
+// Request method calls this directly) — the pending/resolved event
+// sequence and fail-closed timeout behavior around gateStore, shared by
+// all three gate kinds.
+//
+// explicitTimeout is always 0 from grpc.go today (pb.GateRequest has no
+// timeout_seconds field by design — see execapi.proto); kept as a
+// parameter, not folded into gateWaitTimeout's ctx-only lookup, for the
+// same reason runExec keeps one.
+func (s *Server) requestGate(ctx context.Context, sessionID string, req gateRequest, explicitTimeout time.Duration) (gateResult, error) {
 	var phase, reason, proposedAction, tier, gateKind string
 	var options []string
 	switch req.Kind {
@@ -151,8 +143,7 @@ func (s *Server) handleGate(w http.ResponseWriter, r *http.Request) {
 		reason = req.Prompt
 		options = req.Options
 	default:
-		http.Error(w, "unknown gate kind (want \"phase\", \"tool_call\", or \"question\")", http.StatusBadRequest)
-		return
+		return gateResult{}, fmt.Errorf("unknown gate kind %q (want \"phase\", \"tool_call\", or \"question\")", req.Kind)
 	}
 
 	gateID := newID()
@@ -163,29 +154,14 @@ func (s *Server) handleGate(w http.ResponseWriter, r *http.Request) {
 		Reason: reason, ProposedAction: proposedAction, Options: options,
 	})
 
-	timeout := s.gateTimeout
-	if timeout <= 0 {
-		timeout = defaultGateTimeout
-	}
-	// A "question" carries its own caller-supplied timeout (the human_input
-	// tool's own spec.timeout, typically much shorter than the 10-minute
-	// default used for phase/tool_call gates) — the Go side must honor it
-	// rather than block far longer than the Python side's httpx client will
-	// actually wait.
-	if req.Kind == "question" && req.TimeoutSeconds > 0 {
-		timeout = time.Duration(req.TimeoutSeconds * float64(time.Second))
-	}
+	timeout := s.gateWaitTimeout(ctx, explicitTimeout)
 
 	select {
 	case result := <-resultCh:
 		s.emit(sessionID, "human_gate.resolved", humanGateResolvedPayload{
 			GateID: gateID, Decision: result.Decision, Note: result.Note,
 		})
-		if req.Kind == "question" {
-			writeJSON(w, http.StatusOK, map[string]string{"response": result.Decision})
-		} else {
-			writeJSON(w, http.StatusOK, gateResponse{Approved: result.Decision == "approve"})
-		}
+		return result, nil
 
 	case <-time.After(timeout):
 		s.gateStore.remove(gateID)
@@ -193,22 +169,48 @@ func (s *Server) handleGate(w http.ResponseWriter, r *http.Request) {
 			// Matches the existing non-daemon fallback in
 			// tools/human_input/handler.py (WS timeout -> "proceed") rather
 			// than reusing "reject", which has no meaning for a question.
+			result := gateResult{Decision: "proceed", Note: "timed out waiting for a human answer"}
 			s.emit(sessionID, "human_gate.resolved", humanGateResolvedPayload{
-				GateID: gateID, Decision: "proceed", Note: "timed out waiting for a human answer",
+				GateID: gateID, Decision: result.Decision, Note: result.Note,
 			})
-			writeJSON(w, http.StatusOK, map[string]string{"response": "proceed"})
-			return
+			return result, nil
 		}
 		// Fail closed: an un-actioned mutates-external gate is treated as
 		// rejected, not silently approved, after a very long wait.
+		result := gateResult{Decision: "reject", Note: "timed out waiting for a human decision"}
 		s.emit(sessionID, "human_gate.resolved", humanGateResolvedPayload{
-			GateID: gateID, Decision: "reject", Note: "timed out waiting for a human decision",
+			GateID: gateID, Decision: result.Decision, Note: result.Note,
 		})
-		writeJSON(w, http.StatusOK, gateResponse{Approved: false})
+		return result, nil
 
-	case <-r.Context().Done():
+	case <-ctx.Done():
 		s.gateStore.remove(gateID)
+		return gateResult{}, ctx.Err()
 	}
+}
+
+// gateWaitTimeout: an explicit override wins if given; otherwise derive it
+// from ctx's own deadline — grpc's native per-call deadline, propagated
+// from the Python client's RPC timeout — minus a small safety margin so
+// this handler can still respond with a clean "reject"/"proceed" a moment
+// before the caller's own deadline would fire and turn it into a raw
+// DeadlineExceeded instead; otherwise defaultGateTimeout.
+func (s *Server) gateWaitTimeout(ctx context.Context, explicit time.Duration) time.Duration {
+	if explicit > 0 {
+		return explicit
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		const margin = 2 * time.Second
+		if remaining := time.Until(deadline); remaining > margin {
+			return remaining - margin
+		} else if remaining > 0 {
+			return remaining
+		}
+	}
+	if s.gateTimeout > 0 {
+		return s.gateTimeout
+	}
+	return defaultGateTimeout
 }
 
 // Mirrors session.HumanGateResolved's JSON shape.

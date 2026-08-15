@@ -127,7 +127,7 @@ func (e *ContainerExecutor) Start(sessionID, tangentDir string, opts SessionStar
 	// file from the swarm engine's internal span trace tailed here).
 	traceDir := filepath.Join(tangentDir, "traces")
 
-	swarmCmd, err := LaunchSwarmProcess(sessionID, opts.Goal, topologyPath, e.repoPath, worktreePath, traceDir, e.execAPI.BaseURL(), token)
+	swarmCmd, err := LaunchSwarmProcess(sessionID, opts.Goal, topologyPath, e.repoPath, worktreePath, traceDir, e.execAPI.GRPCTarget(), token)
 	if err != nil {
 		e.mu.Lock()
 		delete(e.running, sessionID)

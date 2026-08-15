@@ -124,11 +124,11 @@ class SwarmRuntime:
         # cli/main.py's _build_runtime, because _daemon_gate_request's
         # fallback to _human_phase_gate needs self.trace_id, which isn't
         # assigned until the line above — a standalone `swarm run` (no
-        # TANGENT_DAEMON_URL) leaves this at whatever was passed in (None
+        # TANGENT_DAEMON_GRPC_TARGET) leaves this at whatever was passed in (None
         # by default), so _run_lifecycle's existing
         # `if self._on_gate_request: ... else: _human_phase_gate(...)`
         # fallback is completely unchanged for that case.
-        if self._on_gate_request is None and daemon_client.DAEMON_URL:
+        if self._on_gate_request is None and daemon_client.DAEMON_GRPC_TARGET:
             self._on_gate_request = self._daemon_gate_request
 
         # Topology-wide safety policy: tool_allowlist + mutates-external (or
@@ -144,29 +144,34 @@ class SwarmRuntime:
     async def _daemon_gate_request(self, phase_id: str, phase_name: str) -> bool:
         """Daemon-aware counterpart to _human_phase_gate — routes a
         lifecycle phase-transition gate through the Go daemon's execapi
-        (POST /sessions/{id}/gate) instead of blocking on this process's own
-        stdin, so a background daemon subprocess with no attached terminal
-        can still genuinely pause for a human decision (resolved by the
+        Gate.Request RPC instead of blocking on this process's own stdin,
+        so a background daemon subprocess with no attached terminal can
+        still genuinely pause for a human decision (resolved by the
         existing Wails ResolveGate method via the frontend's approve/reject
         click).
         """
-        if not daemon_client.DAEMON_URL:
+        if not daemon_client.DAEMON_GRPC_TARGET:
             return await _human_phase_gate(phase_id, phase_name, self.trace_id)
 
-        import httpx
+        from core.execapi_grpc.execapi.v1 import execapi_pb2, execapi_pb2_grpc
 
         # Long enough to comfortably exceed the daemon's own gate timeout
         # (10 minutes default) — this must not time out before the daemon
         # does, or a genuine pending approval would look like a network
-        # failure instead of "still waiting".
-        async with httpx.AsyncClient(timeout=650) as client:
-            resp = await client.post(
-                f"{daemon_client.DAEMON_URL}/sessions/{daemon_client.SESSION_ID}/gate",
-                json={"kind": "phase", "phase_id": phase_id, "phase_name": phase_name},
-                headers={"Authorization": f"Bearer {daemon_client.DAEMON_TOKEN}"},
+        # failure instead of "still waiting". Unlike the old HTTP path,
+        # this number IS what the Go side actually waits on now (minus a
+        # small safety margin — see gate.go's gateWaitTimeout), not a
+        # separately-trusted client-side guess.
+        async with daemon_client.grpc_channel() as channel:
+            stub = execapi_pb2_grpc.GateStub(channel)
+            resp = await stub.Request(
+                execapi_pb2.GateRequest(
+                    kind=execapi_pb2.GATE_KIND_PHASE, phase_id=phase_id, phase_name=phase_name,
+                ),
+                metadata=daemon_client.grpc_metadata(),
+                timeout=650,
             )
-        resp.raise_for_status()
-        return resp.json()["approved"]
+        return resp.approved
 
     async def _daemon_ws_requester(
         self, prompt_text: str, options: Optional[list[str]], timeout: float
@@ -174,26 +179,26 @@ class SwarmRuntime:
         """Daemon-aware counterpart to api/server.py's request_human_input —
         registered as tools/human_input/handler.py's _ws_requester so a
         daemon-launched session's human_input tool calls route through the
-        Go daemon's execapi gate (kind: "question") instead of silently
-        auto-approving. Timeout is the tool's own per-call timeout (not the
-        fixed 10-minute default used for phase/tool_call gates), so the
-        request timeout must track it rather than a fixed generous value.
+        Go daemon's execapi Gate.Request RPC (kind=GATE_KIND_QUESTION)
+        instead of silently auto-approving. Timeout is the tool's own
+        per-call timeout (not the fixed 10-minute default used for
+        phase/tool_call gates), so the RPC deadline below tracks it rather
+        than a fixed generous value — and, since there's no
+        timeout_seconds field on GateRequest, this deadline is the only
+        thing telling the Go side how long to actually wait.
         """
-        import httpx
+        from core.execapi_grpc.execapi.v1 import execapi_pb2, execapi_pb2_grpc
 
-        async with httpx.AsyncClient(timeout=timeout + 30) as client:
-            resp = await client.post(
-                f"{daemon_client.DAEMON_URL}/sessions/{daemon_client.SESSION_ID}/gate",
-                json={
-                    "kind": "question",
-                    "prompt": prompt_text,
-                    "options": options,
-                    "timeout_seconds": timeout,
-                },
-                headers={"Authorization": f"Bearer {daemon_client.DAEMON_TOKEN}"},
+        async with daemon_client.grpc_channel() as channel:
+            stub = execapi_pb2_grpc.GateStub(channel)
+            resp = await stub.Request(
+                execapi_pb2.GateRequest(
+                    kind=execapi_pb2.GATE_KIND_QUESTION, prompt=prompt_text, options=options or [],
+                ),
+                metadata=daemon_client.grpc_metadata(),
+                timeout=timeout + 30,
             )
-        resp.raise_for_status()
-        return resp.json()["response"]
+        return resp.decision
 
     # Fields the frontend keys off directly — promoted to the top level of the
     # emitted event; everything else nests under "detail".
@@ -234,7 +239,7 @@ class SwarmRuntime:
         # that ordering by itself — see the `_ws_requester is None` check
         # added to handler.py's short-circuit — but this is where the daemon
         # learns a real requester exists at all.
-        if daemon_client.DAEMON_URL:
+        if daemon_client.DAEMON_GRPC_TARGET:
             hi.set_ws_requester(self._daemon_ws_requester)
 
         if self._code_searcher:
