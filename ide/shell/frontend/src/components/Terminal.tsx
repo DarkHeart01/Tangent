@@ -134,10 +134,35 @@ export default function Terminal() {
   };
   useEffect(() => { if (!activeTab && tabs[0]) setActiveTab(tabs[0].id); }, [activeTab, tabs]);
   useEffect(() => { if (activeSessionId) setActiveTab("swarm-session"); else if (activeTab === "swarm-session") setActiveTab(tabs[0]?.id ?? null); }, [activeSessionId, activeTab, tabs]);
+  // Terminal menu's "Run Active File" / "Run Selected Text" (AccessBar.tsx,
+  // computed in Editor.tsx which owns the active file/selection) land here as
+  // a command string. Reuses the active ready terminal if there is one,
+  // otherwise spins up a new one and holds the command until it's ready.
+  const pendingRunRef = useRef<string | null>(null);
   const onReady = useCallback((pendingID: string, info: wailsClient.LocalTerminalInfo) => {
     setTabs((current) => current.map((tab) => tab.id === pendingID ? { ...tab, id: info.id, label: info.shell.toLowerCase().includes("pwsh") ? "PowerShell" : info.shell.split(/[\\/]/).pop() ?? "Terminal", pending: false, shell: info.shell } : tab));
     setActiveTab((current) => current === pendingID ? info.id : current);
+    if (pendingRunRef.current) {
+      const command = pendingRunRef.current;
+      pendingRunRef.current = null;
+      void wailsClient.writeTerminal(info.id, `${command}\r`).catch(() => undefined);
+    }
   }, []);
+
+  useEffect(() => {
+    const onNewTerminal = () => addTerminal();
+    const onRun = (event: Event) => {
+      const command = (event as CustomEvent<{ command: string }>).detail?.command;
+      if (!command) return;
+      const active = tabs.find((tab) => tab.id === activeTab);
+      if (active && !active.pending) void wailsClient.writeTerminal(active.id, `${command}\r`).catch(() => undefined);
+      else { pendingRunRef.current = command; addTerminal(); }
+    };
+    window.addEventListener("tangent:new-terminal", onNewTerminal);
+    window.addEventListener("tangent:terminal-run", onRun);
+    return () => { window.removeEventListener("tangent:new-terminal", onNewTerminal); window.removeEventListener("tangent:terminal-run", onRun); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabs, activeTab]);
 
   // When the workspace folder changes, move the live terminal into it (the
   // native PTY persists across folder switches — see App.tsx — so it must be

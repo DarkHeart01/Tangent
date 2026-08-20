@@ -84,6 +84,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [refreshSessions],
   );
 
+  // Only ever has a live WS client for a session started in this page
+  // instance (clientsRef is populated in startSession, and SessionSummary
+  // from ListSessions carries no ws_url to reconstruct one from) -- selecting
+  // an older session that predates this page load shows its static status
+  // but no live event feed. Not a regression: nothing previously exposed
+  // switching between sessions at all.
   const selectSession = useCallback((id: string) => {
     setActiveSessionId(id);
   }, []);

@@ -18,6 +18,7 @@ type SourceControlProps = {
 
 export default function SourceControl({ root, github, initialPR }: SourceControlProps) {
   const [status, setStatus] = useState<wailsClient.GitStatus | null>(null);
+  const [commits, setCommits] = useState<wailsClient.GitHubCommit[]>([]);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -45,6 +46,7 @@ export default function SourceControl({ root, github, initialPR }: SourceControl
   const refresh = useCallback(async () => {
     if (!root) {
       setStatus(null);
+      setCommits([]);
       window.dispatchEvent(new CustomEvent("tangent:git-status", { detail: {} }));
       window.dispatchEvent(new CustomEvent("tangent:git-status-summary", { detail: null }));
       return;
@@ -61,6 +63,10 @@ export default function SourceControl({ root, github, initialPR }: SourceControl
       window.dispatchEvent(new CustomEvent("tangent:git-status", { detail: {} }));
       window.dispatchEvent(new CustomEvent("tangent:git-status-summary", { detail: null }));
     }
+    // Graph section — a flat recent-commit list (GitLog only returns each
+    // commit's message, not hash/author/date, so this is deliberately a
+    // simple list rather than a branch-line graph render).
+    try { setCommits(await wailsClient.gitLog(root, 30)); } catch { setCommits([]); }
   }, [root]);
 
   useEffect(() => { void refresh(); }, [refresh]);
@@ -173,5 +179,13 @@ export default function SourceControl({ root, github, initialPR }: SourceControl
       {pr && <button className="github-create-link" onClick={() => openURL(pr.url)}>Open Pull Request</button>}<button className="github-view-all" onClick={() => allPROpen ? setAllPROpen(false) : void loadAllPRs()}>{allPROpen ? "Hide all PRs" : "View all PRs"}</button>{allPROpen && <div className="github-pr-list">{allPRs.map((item) => <button key={item.number} onClick={() => openURL(item.url)}><b>#{item.number} {item.title}</b><small>{item.author} · {item.head_branch}</small></button>)}</div>}
     </div>}</section>}
     </div>}
+    {commits.length > 0 && <section className="source-control__graph">
+      <header><span className="codicon codicon-git-commit" /><strong>Graph</strong></header>
+      <div className="source-control__graph-list">
+        {commits.map((commit, index) => (
+          <div className="source-control__graph-row" key={index}><span className="source-control__graph-dot" /><span>{commit.message}</span></div>
+        ))}
+      </div>
+    </section>}
   </div>;
 }

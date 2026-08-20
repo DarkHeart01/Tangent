@@ -11,7 +11,7 @@ type WorkspaceContextValue = {
   recentProjects: RecentProject[];
   openFolder: () => Promise<void>;
   openFile: () => Promise<void>;
-  createFile: (parentPath?: string) => Promise<void>;
+  createFile: (parentPath?: string, requestedName?: string) => Promise<void>;
   openRecent: (project: RecentProject) => Promise<void>;
   saveFile: (path: string, content: string) => Promise<void>;
   createFolder: (parentPath?: string) => Promise<void>;
@@ -182,12 +182,18 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     }
     return openFolder();
   }, [openFolder, remember]);
-  const createFile = useCallback(async (parentPath = "") => {
+  const createFile = useCallback(async (parentPath = "", requestedName?: string) => {
     const current = workspace;
     const existing = new Set(current?.files.map((item) => item.path) ?? []);
-    let index = 1; let path = parentPath ? `${parentPath}/untitled.txt` : "untitled.txt";
-    const stem = parentPath ? `${parentPath}/untitled` : "untitled";
-    while (existing.has(path)) path = `${stem}-${index++}.txt`;
+    let path: string;
+    if (requestedName) {
+      path = parentPath ? `${parentPath}/${requestedName}` : requestedName;
+      if (existing.has(path)) { window.alert(`${path} already exists.`); return; }
+    } else {
+      let index = 1; path = parentPath ? `${parentPath}/untitled.txt` : "untitled.txt";
+      const stem = parentPath ? `${parentPath}/untitled` : "untitled";
+      while (existing.has(path)) path = `${stem}-${index++}.txt`;
+    }
     if (current?.backendRoot) {
       await wailsClient.writeWorkspaceFile(current.rootPath, path, "");
     }

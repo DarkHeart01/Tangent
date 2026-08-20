@@ -12,6 +12,7 @@ import { useSettings, effectiveLevel } from "../lib/settings";
 import mascot from "../assets/meow_mascot.png";
 import ContextMenu, { type ContextMenuItem } from "./ContextMenu";
 import { useCodeIntel } from "../lib/codeintel/CodeIntelContext";
+import { showToast } from "../lib/toast";
 import { parseIncremental, findEnclosingScope, forgetFile, getTree, type TextEdit, type Span as CISpan } from "../lib/codeintel/treeSitter";
 import { registerInlineCompletionProvider } from "../lib/codeintel/inlineCompletion";
 import type * as monacoNS from "monaco-editor";
@@ -76,6 +77,20 @@ async function loadLocalFileContent(file: { path: string; content: string; handl
   if (!handle || typeof handle.getFile !== "function") return file;
   const blob = await handle.getFile();
   return { ...file, content: await blob.text() };
+}
+
+// Terminal menu's "Run Active File" (AccessBar.tsx). A small, honest set of
+// interpreters -- returns null (toast, not a fake run) for anything else
+// rather than guessing.
+function runCommandForPath(path: string): string | null {
+  const ext = path.split(".").pop()?.toLowerCase();
+  if (ext === "py") return `python "${path}"`;
+  if (ext === "js" || ext === "mjs" || ext === "cjs") return `node "${path}"`;
+  if (ext === "ts" || ext === "tsx") return `npx tsx "${path}"`;
+  if (ext === "go") return `go run "${path}"`;
+  if (ext === "sh") return `bash "${path}"`;
+  if (ext === "ps1") return `powershell -File "${path}"`;
+  return null;
 }
 
 function languageFor(path: string): string {
@@ -565,6 +580,127 @@ export default function Editor({ treeOnly = false }: { treeOnly?: boolean } = {}
     if (codeIntelActive && workspace?.rootPath) void wailsClient.codeIntelForgetFile(workspace.rootPath, path);
   }, [activeSessionId, codeIntelActive, saveFile, selectedPath, tabs, workspace?.rootPath]);
 
+  // File-menu actions (AccessBar.tsx) that need the active-editor-pane's own
+  // state -- only the main (non-treeOnly) instance has real tabs, see the
+  // treeOnly early-return below and the New File/Folder listeners above for
+  // the mirror-image guard.
+  useEffect(() => {
+    if (treeOnly) return;
+    const onSave = () => { if (selectedPath) void save(selectedPath); };
+    const onSaveAll = () => { Object.values(tabs).filter((tab) => tab.dirty).forEach((tab) => void save(tab.path)); };
+    const onSaveAs = async () => {
+      if (!selectedPath || !tabs[selectedPath]) { showToast("No file open to Save As.", "info"); return; }
+      const requested = window.prompt("Save As — relative path", selectedPath)?.trim();
+      if (!requested || requested === selectedPath) return;
+      const content = tabs[selectedPath].content;
+      try {
+        if (activeSessionId) await wailsClient.writeFile(activeSessionId, requested, content);
+        else await saveFile(requested, content);
+        setTabs((current) => {
+          const next = { ...current };
+          delete next[selectedPath];
+          next[requested] = { path: requested, content, savedContent: content, dirty: false, saving: false, preview: false };
+          return next;
+        });
+        setSelectedPath(requested);
+        if (activeSessionId) refreshTree(activeSessionId);
+        else if (workspace?.backendRoot) refreshWorkspaceTree(workspace.rootPath);
+        showToast(`Saved as ${requested}`, "success");
+      } catch (error) { setLoadError(String(error)); }
+    };
+    const onRevert = async () => {
+      if (!selectedPath || !tabs[selectedPath]) { showToast("No file open to revert.", "info"); return; }
+      if (tabs[selectedPath].dirty && !window.confirm(`Discard changes to ${selectedPath}?`)) return;
+      try {
+        const file = activeSessionId
+          ? await wailsClient.readFile(activeSessionId, selectedPath)
+          : workspace?.backendRoot ? await wailsClient.readWorkspaceFile(workspace.rootPath, selectedPath) : null;
+        if (!file) { showToast("This file can't be reverted from disk.", "info"); return; }
+        updateTab(selectedPath, { content: file.content, savedContent: file.content, dirty: false });
+        showToast(`Reverted ${selectedPath}`, "success");
+      } catch (error) { setLoadError(String(error)); }
+    };
+    const onCloseEditor = () => { if (selectedPath) void closeTab(selectedPath); };
+    window.addEventListener("tangent:save-file", onSave);
+    window.addEventListener("tangent:save-all", onSaveAll);
+    window.addEventListener("tangent:save-file-as", onSaveAs);
+    window.addEventListener("tangent:revert-file", onRevert);
+    window.addEventListener("tangent:close-editor", onCloseEditor);
+    return () => {
+      window.removeEventListener("tangent:save-file", onSave);
+      window.removeEventListener("tangent:save-all", onSaveAll);
+      window.removeEventListener("tangent:save-file-as", onSaveAs);
+      window.removeEventListener("tangent:revert-file", onRevert);
+      window.removeEventListener("tangent:close-editor", onCloseEditor);
+    };
+  }, [treeOnly, selectedPath, tabs, save, closeTab, activeSessionId, saveFile, workspace, refreshTree, refreshWorkspaceTree, updateTab]);
+
+  // File > Auto Save -- debounce-saves the active dirty tab, reusing the same
+  // save() Ctrl+S already calls. Pure frontend; no new backend involved.
+  useEffect(() => {
+    if (treeOnly || !settings.autoSaveEnabled) return;
+    const path = selectedPath;
+    if (!path || !tabs[path]?.dirty) return;
+    const timer = window.setTimeout(() => void save(path), 1200);
+    return () => window.clearTimeout(timer);
+  }, [treeOnly, settings.autoSaveEnabled, selectedPath, tabs, save]);
+
+  // Edit/Selection-menu commands (AccessBar.tsx) -- almost all of these are
+  // real, standard Monaco actions, dispatched by id and run directly against
+  // the mounted editor instance via Monaco's own trigger() entry point.
+  // selectAll is handled by hand since "editor.action.selectAll" isn't a
+  // reliably-registered action id across Monaco versions.
+  useEffect(() => {
+    if (treeOnly) return;
+    const onEditorCommand = (event: Event) => {
+      const id = (event as CustomEvent<{ id: string }>).detail?.id;
+      const ed = editorRef.current as unknown as {
+        trigger?: (source: string, handlerId: string, payload: unknown) => void;
+        focus?: () => void;
+        getModel?: () => { getFullModelRange?: () => unknown } | null;
+        setSelection?: (range: unknown) => void;
+      } | null;
+      if (!id || !ed) { showToast("Open a file first.", "info"); return; }
+      if (id === "selectAll") {
+        const range = ed.getModel?.()?.getFullModelRange?.();
+        if (range) ed.setSelection?.(range);
+      } else {
+        ed.trigger?.("menu", id, null);
+      }
+      ed.focus?.();
+    };
+    window.addEventListener("tangent:editor-command", onEditorCommand);
+    return () => window.removeEventListener("tangent:editor-command", onEditorCommand);
+  }, [treeOnly]);
+
+  // Terminal menu's "Run Active File" / "Run Selected Text" -- computed here
+  // (this instance owns selectedPath/the live selection) and handed off to
+  // Terminal.tsx as a plain command string via tangent:terminal-run.
+  useEffect(() => {
+    if (treeOnly) return;
+    const onRunActiveFile = () => {
+      if (!selectedPath) { showToast("Open a file first.", "info"); return; }
+      const command = runCommandForPath(selectedPath);
+      if (!command) { showToast("Don't know how to run this file type yet.", "info"); return; }
+      window.dispatchEvent(new CustomEvent("tangent:terminal-run", { detail: { command } }));
+      window.dispatchEvent(new CustomEvent("tangent:focus-terminal"));
+    };
+    const onRunSelectedText = () => {
+      const ed = editorRef.current as unknown as { getModel?: () => { getValueInRange?: (range: unknown) => string } | null; getSelection?: () => unknown } | null;
+      const selection = ed?.getSelection?.();
+      const text = selection ? ed?.getModel?.()?.getValueInRange?.(selection) : "";
+      if (!text?.trim()) { showToast("Select some text first.", "info"); return; }
+      window.dispatchEvent(new CustomEvent("tangent:terminal-run", { detail: { command: text } }));
+      window.dispatchEvent(new CustomEvent("tangent:focus-terminal"));
+    };
+    window.addEventListener("tangent:run-active-file", onRunActiveFile);
+    window.addEventListener("tangent:run-selected-text", onRunSelectedText);
+    return () => {
+      window.removeEventListener("tangent:run-active-file", onRunActiveFile);
+      window.removeEventListener("tangent:run-selected-text", onRunSelectedText);
+    };
+  }, [treeOnly, selectedPath]);
+
   const tabList = useMemo(() => Object.values(tabs), [tabs]);
   const showContextMenu = (event: React.MouseEvent, node: FileNode) => {
     event.preventDefault();
@@ -642,9 +778,9 @@ export default function Editor({ treeOnly = false }: { treeOnly?: boolean } = {}
           height="100%" language={languageFor(activeTab.path)} value={activeTab.content} theme={settings.theme === "light" ? "vs" : "vs-dark"}
           onMount={(editor, monaco) => { editorRef.current = editor; monacoNsRef.current = monaco; registerCodeIntelListeners(editor); gutterDecorationIds.current = editor.deltaDecorations([], gutterDiff ? gutterDecorations(gutterDiff.original, gutterDiff.modified) : []); tryReveal(); }}
           onChange={(value) => updateTab(activeTab.path, { content: value ?? "", dirty: (value ?? "") !== activeTab.savedContent, preview: false })}
-          options={{ minimap: { enabled: settings.editorMinimap }, fontFamily: "Cascadia Code, Consolas, 'SFMono-Regular', monospace", fontSize: settings.editorFontSize, tabSize: settings.editorTabSize, lineNumbers: settings.editorLineNumbers ? "on" : "off", padding: { top: 12 }, smoothScrolling: true, scrollBeyondLastLine: false, renderWhitespace: "selection", wordWrap: settings.editorWordWrap, automaticLayout: true }}
+          options={{ minimap: { enabled: settings.editorMinimap }, fontFamily: "Cascadia Code, Consolas, 'SFMono-Regular', monospace", fontSize: settings.editorFontSize, tabSize: settings.editorTabSize, lineNumbers: settings.editorLineNumbers ? "on" : "off", padding: { top: 12 }, smoothScrolling: true, scrollBeyondLastLine: false, renderWhitespace: "selection", wordWrap: settings.editorWordWrap, automaticLayout: true, multiCursorModifier: settings.editorMultiCursorModifier, columnSelection: settings.editorColumnSelection }}
         />
-      </> : <div className="editor-empty"><img src={mascot} alt="Tangent" className="editor-empty__logo-img" /><h2>Tangent IDE</h2><p>Select a file from Explorer to start editing.</p><p className="editor-empty__hint">Start a swarm session to create an editable worktree.</p></div>}
+      </> : <div className="editor-empty"><img src={mascot} alt="Tangent" className="editor-empty__logo-img" /><div className="editor-empty__wordmark">TANGENT</div><p>Select a file from Explorer to start editing.</p><p className="editor-empty__hint">Start a swarm session to create an editable worktree.</p></div>}
     </div>
   </div>;
 }

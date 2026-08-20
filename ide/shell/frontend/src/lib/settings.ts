@@ -28,6 +28,26 @@ export type Settings = {
   // Adaptive-mode-only: accepted-suggestion counters per level, driving
   // escalation at 3 (see effectiveLevel). Not used in manual (non-adaptive) modes.
   codeIntelAdaptiveProgress: { low: number; mid: number };
+  // File > Auto Save. Debounce-saves the active dirty tab (Editor.tsx) --
+  // pure frontend, reuses the same save path Ctrl+S already calls.
+  autoSaveEnabled: boolean;
+  // Selection menu toggles -- real Monaco editor options (multiCursorModifier
+  // / columnSelection), passed straight through to <MonacoEditor options>.
+  editorMultiCursorModifier: "alt" | "ctrlCmd";
+  editorColumnSelection: boolean;
+  // View > Appearance > Zoom In/Out/Reset -- applied as a CSS zoom on #App
+  // (App.css). WebView2 is Chromium-based, which supports the `zoom`
+  // property directly, so this is real UI scaling, not a fake control.
+  uiZoomLevel: number;
+  // Customize Layout panel (AccessBar.tsx CustomizeLayout.tsx) -- real
+  // visibility/position toggles, all applied directly in App.tsx/App.css.
+  menuBarVisible: boolean;
+  activityBarVisible: boolean;
+  statusBarVisible: boolean;
+  primarySideBarPosition: "left" | "right";
+  quickInputPosition: "top" | "center";
+  zenMode: boolean;
+  centeredLayout: boolean;
 };
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -42,7 +62,22 @@ export const DEFAULT_SETTINGS: Settings = {
   codeIntelPythonEnabled: true,
   codeIntelLevel: "low",
   codeIntelAdaptiveProgress: { low: 0, mid: 0 },
+  autoSaveEnabled: false,
+  editorMultiCursorModifier: "alt",
+  editorColumnSelection: false,
+  uiZoomLevel: 1,
+  menuBarVisible: true,
+  activityBarVisible: true,
+  statusBarVisible: true,
+  primarySideBarPosition: "left",
+  quickInputPosition: "top",
+  zenMode: false,
+  centeredLayout: false,
 };
+
+export const ZOOM_STEP = 0.1;
+export const ZOOM_MIN = 0.6;
+export const ZOOM_MAX = 2;
 
 export const ADAPTIVE_ESCALATION_THRESHOLD = 3;
 

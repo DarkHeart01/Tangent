@@ -9,9 +9,9 @@ export default function WelcomeView() {
     <div className="welcome-view__content">
       <div className="welcome-view__brand">
         <img src={mascot} alt="Tangent mascot" className="welcome-view__logo" />
-        <h1>Tangent IDE</h1>
+        <span className="welcome-view__wordmark">TANGENT</span>
       </div>
-      <p className="welcome-view__subtitle">Editing evolved for agent-assisted development</p>
+      <p className="welcome-view__subtitle">An agentic IDE that helps you do your best work.</p>
       <div className="welcome-view__columns welcome-view__columns--single">
         <section><h2>Start</h2>
           <button onClick={() => void createFile()}><span className="codicon codicon-new-file" /> <span>New File...</span></button>

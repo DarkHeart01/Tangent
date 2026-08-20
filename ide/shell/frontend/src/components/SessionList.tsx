@@ -1,14 +1,23 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSession } from "../lib/SessionContext";
 import * as wailsClient from "../lib/wailsClient";
 import type { SessionMode } from "../lib/wailsClient";
+import mascot from "../assets/meow_mascot.png";
 
 const TOPOLOGIES = ["coding_swarm", "software_delivery", "software_delivery_lite", "research_swarm"];
 const MODES: { value: SessionMode; label: string; detail: string }[] = [
   { value: "simulated", label: "Simulated", detail: "scripted, no Docker / key" },
   { value: "container", label: "Container", detail: "real Docker + swarm" },
 ];
-const STATUS_COLOR: Record<string, string> = { running: "#d29922", success: "#3fb950", failed: "#f85149", cancelled: "#8b949e" };
+// Figma's workflow shortcuts, mapped onto this repo's real topologies (there's
+// no 1:1 backend concept for each Kiro-style workflow name, so this prefills
+// a sensible goal template + topology rather than inventing new backend modes).
+const WORKFLOWS: { label: string; detail: string; topology: string; template: string }[] = [
+  { label: "Spec", detail: "Structured feature development", topology: "software_delivery", template: "Spec: " },
+  { label: "Plan", detail: "Plan-only mode that breaks an idea into an implementation plan", topology: "software_delivery_lite", template: "Plan: " },
+  { label: "Bug Fix", detail: "Structured bug-fix workflow: investigate, diagnose, and resolve", topology: "coding_swarm", template: "Fix: " },
+  { label: "Quick Spec", detail: "Fast spec workflow: clarify, then auto-generate", topology: "software_delivery_lite", template: "Quick spec: " },
+];
 
 function ProviderKeyPanel() {
   const [status, setStatus] = useState<wailsClient.ProviderKeyStatus | null>(null);
@@ -62,13 +71,12 @@ function ProviderKeyPanel() {
 }
 
 export default function SessionList() {
-  const { sessions, activeSessionId, starting, error, startSession, stopSession } = useSession();
-  const [goal, setGoal] = useState("Add a Widget/Owner schema and ship it to staging");
+  const { sessions, starting, error, startSession } = useSession();
+  const [goal, setGoal] = useState("");
   const [topology, setTopology] = useState(TOPOLOGIES[0]);
   const [mode, setMode] = useState<SessionMode>("simulated");
-  const [stopping, setStopping] = useState(false);
+  const goalRef = useRef<HTMLTextAreaElement>(null);
   const recentGoals = useMemo(() => Array.from(new Set(sessions.map((session) => session.goal))).slice(-6).reverse(), [sessions]);
-  const active = sessions.find((session) => session.session_id === activeSessionId);
   const nativeDesktop = wailsClient.isWailsDesktop();
 
   const start = async (event: React.FormEvent) => {
@@ -77,21 +85,29 @@ export default function SessionList() {
     await startSession(goal.trim(), topology, mode);
   };
 
-  const stop = async () => {
-    if (!activeSessionId || stopping) return;
-    setStopping(true);
-    try { await stopSession(activeSessionId); } finally { setStopping(false); }
+  const applyWorkflow = (workflow: typeof WORKFLOWS[number]) => {
+    setTopology(workflow.topology);
+    setGoal((current) => (current.trim() ? current : workflow.template));
+    goalRef.current?.focus();
   };
 
-  if (activeSessionId) return <div className="swarm-session-strip">
-    <span className="status-dot" style={{ background: STATUS_COLOR[active?.status ?? "running"] }} />
-    <span className="swarm-session-strip__goal" title={active?.goal}>{active?.goal ?? "Active session"}</span>
-    <span className="swarm-session-strip__mode">{active?.mode ?? "simulated"}</span>
-    <button className="swarm-session-strip__stop" onClick={() => void stop()} disabled={stopping || (active?.status !== undefined && active.status !== "running")} title="Stop this session">{stopping ? "Stopping…" : "Stop"}</button>
-  </div>;
-
   return <div className="session-setup">
-    <div className="goal-field"><label htmlFor="goal">GOAL</label><textarea id="goal" value={goal} onChange={(event) => setGoal(event.target.value)} rows={3} placeholder="Describe what the swarm should deliver…" /></div>
+    <div className="session-setup__hero">
+      <img src={mascot} alt="Tangent" className="session-setup__mascot" />
+      <h2>Let's build</h2>
+      <p>Plan, search, or build anything</p>
+    </div>
+    <div className="session-setup__workflows">
+      <span>Start with a workflow (optional)</span>
+      <div className="session-setup__workflow-list">
+        {WORKFLOWS.map((workflow) => (
+          <button type="button" key={workflow.label} onClick={() => applyWorkflow(workflow)}>
+            <span className="codicon codicon-file-code" /><span><strong>{workflow.label}</strong><small>{workflow.detail}</small></span>
+          </button>
+        ))}
+      </div>
+    </div>
+    <div className="goal-field"><label htmlFor="goal">GOAL</label><textarea id="goal" ref={goalRef} value={goal} onChange={(event) => setGoal(event.target.value)} rows={3} placeholder="Describe what the swarm should deliver…" /></div>
     <label className="select-field" htmlFor="topology"><span>TOPOLOGY</span><select id="topology" value={topology} onChange={(event) => setTopology(event.target.value)}>{TOPOLOGIES.map((item) => <option key={item}>{item}</option>)}</select></label>
     <fieldset className="mode-field"><legend>MODE</legend><div className="mode-cards">{MODES.map((item) => <button type="button" key={item.value} className={`mode-card ${mode === item.value ? "is-active" : ""}`} onClick={() => setMode(item.value)}><strong>{item.label}</strong><small>{item.detail}</small></button>)}</div></fieldset>
     {mode === "container" && <ProviderKeyPanel />}
